@@ -4,8 +4,10 @@ Run Claude Code CLI in a sandboxed Docker container with gVisor isolation. Use y
 
 ## Prerequisites
 
-- macOS with Docker Desktop installed
-- gVisor runtime configured in Docker Desktop (recommended, not required)
+- macOS with Docker runtime:
+  - **OrbStack** (recommended) — best compatibility with bind-mounts
+  - **Docker Desktop** — works with `--isolate-claude-data` flag
+- gVisor runtime configured (optional, for additional syscall isolation)
 - Claude Code installed on host (`curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials stored in keychain)
 
@@ -36,7 +38,7 @@ The sandbox provides filesystem isolation and syscall interception while allowin
 | **Filesystem** | Only the specified project directory is mounted. Claude cannot see `~`, `.ssh`, `.env`, or other projects. |
 | **gVisor** | Syscall interception via user-space kernel. All system calls go through gVisor, not the host kernel. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `gosu`. No `sudo` in image. `no-new-privileges` prevents escalation. |
-| **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist on named volume. |
+| **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). |
 
 ### Network (NOT sandboxed)
 
@@ -59,7 +61,9 @@ Only the specified directory is mounted at `/workspace`. Claude cannot see other
 ### Flags
 
 - `--rebuild` — Rebuild image with `--no-cache` (runs lint first)
-- `--fresh-creds` — Overwrite volume credentials with current keychain values
+- `--fresh-creds` — Overwrite credentials with current keychain values
+- `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
+- `--no-gvisor` — Disable gVisor runtime even if available (firewall works without gVisor)
 
 ### Shell alias
 
@@ -92,7 +96,9 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild`
 │  │                                           │  │
 │  │  Mounts:                                  │  │
 │  │   /workspace ← project dir (rw)           │  │
-│  │   ~/.claude ← claude-data volume (rw)     │  │
+│  │   ~/.claude ← host ~/.claude (bind-mount) │  │
+│  │              or claude-data volume        │  │
+│  │              (with --isolate-claude-data) │  │
 │  │                                           │  │
 │  │  Credential flow:                         │  │
 │  │   env CLAUDE_CREDENTIALS                  │  │
@@ -109,7 +115,9 @@ Claude Max uses OAuth stored in macOS keychain under `"Claude Code-credentials"`
 
 ### Persistent state
 
-The named volume `claude-data` persists conversation history, settings, and credentials across runs. Token refreshes performed by Claude Code are preserved.
+By default, the container bind-mounts the host's `~/.claude/` directory. This shares memory files, session history, and settings between the host and container. **This requires OrbStack** — Docker Desktop has permission issues with this bind-mount.
+
+For Docker Desktop compatibility (or harder isolation), use `--isolate-claude-data` to use a separate Docker volume (`claude-data`) instead.
 
 Expired credentials are automatically detected on container start and replaced with fresh ones from keychain. Use `--fresh-creds` to force re-injection even when credentials haven't expired.
 
@@ -174,9 +182,29 @@ docker rmi claude-sandbox
 docker run --rm --runtime=runsc hello-world
 ```
 
-If gVisor is broken, `run-claude.sh` falls back to runc automatically.
+If gVisor is broken, `run-claude.sh` falls back to runc automatically. You can also explicitly disable gVisor with `--no-gvisor`.
+
+### Bash commands fail with Docker Desktop
+
+Docker Desktop's file sharing (VirtioFS/gRPC FUSE) has permission issues with bind-mounts when Claude Code writes to shell-snapshots or session-env directories.
+
+**Solutions:**
+1. **Switch to OrbStack** (recommended) — OrbStack's file sharing handles permissions correctly
+2. **Use isolated data volume** — Run with `--isolate-claude-data` flag:
+   ```bash
+   ./run-claude.sh --isolate-claude-data ~/Projects/my-project
+   ```
+
+| Runtime | Bind-mount `~/.claude` | `--isolate-claude-data` |
+|---------|------------------------|-------------------------|
+| OrbStack | ✅ Works | ✅ Works |
+| Docker Desktop | ❌ Permission errors | ✅ Works |
 
 ### Resetting Claude Code state
+
+By default, state is shared with the host in `~/.claude/`. To reset, remove files there directly.
+
+If using `--isolate-claude-data`, the state lives in a Docker volume:
 
 ```bash
 docker volume rm claude-data

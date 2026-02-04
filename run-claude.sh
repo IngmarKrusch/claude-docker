@@ -5,11 +5,15 @@ set -e
 # Parse flags
 REBUILD=false
 FRESH_CREDS=false
+ISOLATE_DATA=false
+NO_GVISOR=false
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --rebuild) REBUILD=true ;;
         --fresh-creds) FRESH_CREDS=true ;;
+        --isolate-claude-data) ISOLATE_DATA=true ;;
+        --no-gvisor) NO_GVISOR=true ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -48,7 +52,9 @@ fi
 
 # Detect runtime: prefer gVisor (runsc) if available
 RUNTIME_FLAG=""
-if docker info 2>/dev/null | grep -q runsc; then
+if [ "$NO_GVISOR" = true ]; then
+    echo "[sandbox] gVisor disabled via --no-gvisor"
+elif docker info 2>/dev/null | grep -q runsc; then
     RUNTIME_FLAG="--runtime=runsc"
     echo "[sandbox] Using gVisor runtime"
 else
@@ -63,6 +69,21 @@ if [ "$FRESH_CREDS" = true ]; then
     FORCE_CREDS_FLAG="-e FORCE_CREDENTIALS=1"
 fi
 
+# Determine Claude data mount: bind-mount host ~/.claude by default, or use named volume with --isolate-claude-data
+if [ "$ISOLATE_DATA" = true ]; then
+    CLAUDE_DATA_MOUNT="claude-data:/home/claude/.claude"
+    echo "[sandbox] Using isolated data volume"
+else
+    # Ensure host ~/.claude directory exists with initial config
+    mkdir -p "$HOME/.claude"
+    if [ ! -f "$HOME/.claude/.config.json" ]; then
+        echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$HOME/.claude/.config.json"
+        echo "[sandbox] Created initial config"
+    fi
+    CLAUDE_DATA_MOUNT="$HOME/.claude:/home/claude/.claude"
+    echo "[sandbox] Sharing ~/.claude with host (use --isolate-claude-data for isolation)"
+fi
+
 docker run --rm -it \
     $RUNTIME_FLAG \
     --cap-add=NET_ADMIN \
@@ -72,6 +93,6 @@ docker run --rm -it \
     $FORCE_CREDS_FLAG \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
-    -v claude-data:/home/claude/.claude \
+    -v "$CLAUDE_DATA_MOUNT" \
     "$IMAGE_NAME" \
     claude --allow-dangerously-skip-permissions

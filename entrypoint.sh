@@ -1,11 +1,19 @@
 #!/bin/bash
 set -e
 
+# Log entrypoint messages (Claude Code clears the terminal, so we log to file too)
+LOGFILE="/home/claude/.claude/entrypoint.log"
+log() {
+    echo "$1"
+    echo "$(date '+%H:%M:%S') $1" >> "$LOGFILE"
+}
+echo "=== Entrypoint $(date) ===" >> "$LOGFILE"
+
 # Initialize firewall if NET_ADMIN capability is available
 if /usr/local/bin/init-firewall.sh 2>/dev/null; then
-    echo "[sandbox] Firewall initialized"
+    log "[sandbox] Firewall initialized"
 else
-    echo "[sandbox] Warning: Firewall not initialized (missing NET_ADMIN)"
+    log "[sandbox] Warning: Firewall not initialized (missing NET_ADMIN)"
 fi
 
 # Write credentials from environment variable into .claude directory
@@ -18,7 +26,7 @@ if [ -f "$CREDS_FILE" ]; then
     NOW_MS=$(($(date +%s) * 1000))
     if [ "$EXPIRES_AT" -le "$NOW_MS" ] && [ "$EXPIRES_AT" -ne 0 ]; then
         EXPIRED=true
-        echo "[sandbox] Existing credentials expired"
+        log "[sandbox] Existing credentials expired"
     fi
 fi
 
@@ -28,31 +36,32 @@ if [ -n "$CLAUDE_CREDENTIALS" ]; then
         chown claude: "$CREDS_FILE"
         chmod 600 "$CREDS_FILE"
         if [ "${FORCE_CREDENTIALS:-}" = "1" ]; then
-            echo "[sandbox] Credentials force-refreshed from keychain"
+            log "[sandbox] Credentials force-refreshed from keychain"
         elif [ "$EXPIRED" = true ]; then
-            echo "[sandbox] Credentials auto-refreshed (expired)"
+            log "[sandbox] Credentials auto-refreshed (expired)"
         else
-            echo "[sandbox] Credentials written (first run)"
+            log "[sandbox] Credentials written (first run)"
         fi
     else
-        echo "[sandbox] Using existing credentials from volume (pass --fresh-creds to override)"
+        log "[sandbox] Using existing credentials from volume (pass --fresh-creds to override)"
     fi
     unset CLAUDE_CREDENTIALS
     unset FORCE_CREDENTIALS
 elif [ -f "$CREDS_FILE" ]; then
     chmod 600 "$CREDS_FILE"
-    echo "[sandbox] Credentials loaded (from volume)"
+    log "[sandbox] Credentials loaded (from volume)"
 else
-    echo "[sandbox] Warning: No credentials found. Run 'claude login' or mount credentials."
+    log "[sandbox] Warning: No credentials found. Run 'claude login' or mount credentials."
 fi
 
 # Ensure Claude Code's config file lives on the volume.
 # Without this, config is written to ~/.claude.json (outside the volume mount)
 # and lost when the container exits. ~/.claude/.config.json is the preferred
 # path that Claude Code checks first.
+# Include required flags to skip interactive prompts in fresh volumes.
 CONFIG_FILE="/home/claude/.claude/.config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo '{}' > "$CONFIG_FILE"
+    echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$CONFIG_FILE"
     chown claude: "$CONFIG_FILE"
 fi
 
@@ -61,7 +70,7 @@ if [ -f /tmp/host-gitconfig ]; then
     cp /tmp/host-gitconfig /home/claude/.gitconfig
     chown claude: /home/claude/.gitconfig
     HOME=/home/claude git config --global --add safe.directory /workspace
-    echo "[sandbox] Git configured"
+    log "[sandbox] Git configured"
 fi
 
 # Set user environment variables that 'USER claude' in Dockerfile would have
