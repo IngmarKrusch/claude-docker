@@ -29,6 +29,8 @@ fi
 
 # Build image if needed (or forced with --rebuild)
 if [ "$REBUILD" = true ]; then
+    echo "Linting Dockerfile..."
+    "$SCRIPT_DIR/lint.sh"
     echo "Rebuilding sandbox image..."
     docker build --no-cache \
         --build-arg USER_ID=$(id -u) \
@@ -65,6 +67,7 @@ docker run --rm -it \
     $RUNTIME_FLAG \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
+    --security-opt=no-new-privileges \
     -e CLAUDE_CREDENTIALS="$CREDS" \
     $FORCE_CREDS_FLAG \
     -v "$PROJECT_DIR":/workspace \

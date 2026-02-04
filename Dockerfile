@@ -5,15 +5,15 @@ ARG GROUP_ID=20
 ARG CLAUDE_CODE_VERSION=latest
 
 # System dependencies (firewall + dev tools)
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl sudo zsh fzf ripgrep jq aggregate ca-certificates \
+    git curl gosu zsh fzf ripgrep jq aggregate ca-certificates \
     iptables ipset dnsutils iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user matching host UID/GID
 RUN (groupadd -g ${GROUP_ID} claude 2>/dev/null || true) \
-    && useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash claude \
-    && echo "claude ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh" >> /etc/sudoers
+    && useradd -m -l -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash claude
 
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
@@ -29,7 +29,6 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN mkdir -p /workspace && chown ${USER_ID}:${GROUP_ID} /workspace
 RUN mkdir -p /home/claude/.claude && chown ${USER_ID}:${GROUP_ID} /home/claude/.claude
 
-USER claude
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

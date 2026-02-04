@@ -17,6 +17,9 @@ cd ~/Projects/some-project
 
 # Force re-inject credentials from keychain (overrides volume)
 ~/Projects/claude-docker/run-claude.sh --fresh-creds ~/Projects/my-project
+
+# Lint the Dockerfile (runs hadolint via Docker)
+~/Projects/claude-docker/lint.sh
 ```
 
 The first run builds the Docker image (installs Node 22, Claude Code, tools). Subsequent runs reuse the cached image.
@@ -70,34 +73,34 @@ dclaude --fresh-creds ~/Projects/my-project
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────┐
-│ macOS Host                                    │
-│                                               │
-│  run-claude.sh:                               │
-│   1. Extract OAuth creds from macOS keychain  │
-│   2. Pass as env var CLAUDE_CREDENTIALS       │
-│   3. Launch container                         │
-│                                               │
-│  ┌─────────────────────────────────────────┐  │
-│  │ Docker Container (gVisor runtime)       │  │
-│  │                                         │  │
-│  │  User: claude (UID 501, GID 20)         │  │
-│  │  Claude Code CLI + Node.js 22           │  │
-│  │  --allow-dangerously-skip-permissions   │  │
-│  │                                         │  │
-│  │  Mounts:                                │  │
-│  │   /workspace ← project dir (rw)         │  │
-│  │   /tmp/host-gitconfig ← gitconfig (ro)  │  │
-│  │   ~/.claude ← claude-data volume (rw)   │  │
-│  │                                         │  │
-│  │  Credential flow:                       │  │
-│  │   env CLAUDE_CREDENTIALS                │  │
-│  │     → entrypoint writes to              │  │
-│  │       ~/.claude/.credentials.json       │  │
-│  │     → env var unset before exec         │  │
-│  │     → Claude Code reads file normally   │  │
-│  └─────────────────────────────────────────┘  │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│ macOS Host                                      │
+│                                                 │
+│  run-claude.sh:                                 │
+│   1. Extract OAuth creds from macOS keychain    │
+│   2. Pass as env var CLAUDE_CREDENTIALS         │
+│   3. Launch container                           │
+│                                                 │
+│  ┌───────────────────────────────────────────┐   │
+│  │ Docker Container (gVisor runtime)        │   │
+│  │                                          │   │
+│  │  Starts as root → gosu drops to claude    │   │
+│  │  Claude Code CLI + Node.js 22            │   │
+│  │  --allow-dangerously-skip-permissions     │   │
+│  │                                          │   │
+│  │  Mounts:                                 │   │
+│  │   /workspace ← project dir (rw)          │   │
+│  │   /tmp/host-gitconfig ← gitconfig (ro)   │   │
+│  │   ~/.claude ← claude-data volume (rw)    │   │
+│  │                                          │   │
+│  │  Credential flow:                        │   │
+│  │   env CLAUDE_CREDENTIALS                 │   │
+│  │     → entrypoint writes to               │   │
+│  │       ~/.claude/.credentials.json        │   │
+│  │     → env var unset before exec          │   │
+│  │     → Claude Code reads file normally    │   │
+│  └───────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────┘
 ```
 
 ### Credential Flow
@@ -126,7 +129,8 @@ docker volume rm claude-data
 |-------|-----------|
 | **Filesystem isolation** | Only the specified project directory is mounted. Claude cannot see `~`, other projects, `.ssh`, `.env` files, or system directories. |
 | **gVisor (runsc)** | Syscall interception. The container runs on a user-space kernel that intercepts all system calls. Even if Claude Code executes arbitrary commands, they go through gVisor's restricted syscall implementation, not the real host kernel. |
-| **Non-root user** | Container runs as UID 501 (matching your macOS user), not root. |
+| **Privilege drop via gosu** | Container starts as root for firewall setup, then drops to UID 501 (matching your macOS user) via `gosu`. No `sudo` binary exists in the image. |
+| **`no-new-privileges`** | Docker's `--security-opt=no-new-privileges` prevents any process from gaining privileges via setuid binaries. Once dropped to the claude user, escalation back to root is impossible. |
 | **Gitconfig isolation** | Host `.gitconfig` is mounted read-only to a staging path, then copied into the container. Claude gets your git identity but cannot modify your host git config. |
 | **Credential scoping** | OAuth credentials are written to a file inside the container and the env var is cleared. Credentials persist on the named volume so token refreshes survive across runs. |
 | **`--allow-dangerously-skip-permissions`** | This flag is safe inside the sandbox. It tells Claude Code to skip its own permission prompts (tool approvals), which makes sense because the container itself is the security boundary. |
@@ -159,19 +163,20 @@ FROM node:22-bookworm-slim
 ```
 
 - Debian Bookworm slim base with Node.js 22
-- System packages: `git`, `curl`, `sudo`, `zsh`, `fzf`, `ripgrep`, `jq`, `aggregate`, `ca-certificates`, `iptables`, `ipset`, `dnsutils`, `iproute2`
+- System packages: `git`, `curl`, `gosu`, `zsh`, `fzf`, `ripgrep`, `jq`, `aggregate`, `ca-certificates`, `iptables`, `ipset`, `dnsutils`, `iproute2`
 - User `claude` created with host UID/GID (default 501:20, macOS standard)
 - Claude Code installed globally via npm (`@anthropic-ai/claude-code@latest`)
 - Firewall and entrypoint scripts copied in
+- No `USER` directive: container starts as root so the entrypoint can run the firewall script directly, then drops to `claude` via `gosu`
 - Build args: `USER_ID`, `GROUP_ID`, `CLAUDE_CODE_VERSION`
 
 ### entrypoint.sh
 
-1. Attempts to initialize the firewall via `sudo init-firewall.sh` (warns on failure)
-2. Writes credentials from `CLAUDE_CREDENTIALS` env var to `~/.claude/.credentials.json` only on first run (or when `FORCE_CREDENTIALS=1`); skips if the file already exists on the volume
+1. Runs as root: attempts to initialize the firewall via `init-firewall.sh` directly (warns on failure)
+2. Writes credentials from `CLAUDE_CREDENTIALS` env var to `/home/claude/.claude/.credentials.json` only on first run (or when `FORCE_CREDENTIALS=1`); chowns the file to `claude`; skips if the file already exists on the volume
 3. Unsets the env var
-4. Copies host gitconfig from `/tmp/host-gitconfig` to `~/.gitconfig` and adds `safe.directory=/workspace`
-5. `exec`s the CMD (default: `claude`)
+4. Copies host gitconfig from `/tmp/host-gitconfig` to `/home/claude/.gitconfig` and adds `safe.directory=/workspace`
+5. Drops privileges via `exec gosu claude` and runs the CMD (default: `claude`)
 
 ### init-firewall.sh
 
@@ -195,8 +200,38 @@ Host-side launcher script. Handles:
 
 **Arguments:**
 - First positional arg: project directory (default: current directory)
-- `--rebuild`: force Docker image rebuild with `--no-cache`
+- `--rebuild`: lint Dockerfile then force Docker image rebuild with `--no-cache`
 - `--fresh-creds`: force overwrite credentials on the volume with current keychain values
+
+### lint.sh
+
+Runs [Hadolint](https://github.com/hadolint/hadolint) on the Dockerfile via the `hadolint/hadolint` Docker image. Called automatically during `--rebuild` and by the pre-commit hook.
+
+### .githooks/pre-commit
+
+Git pre-commit hook that runs `lint.sh`. Enable with `git config core.hooksPath .githooks`.
+
+## Linting
+
+The Dockerfile is linted with [Hadolint](https://github.com/hadolint/hadolint), run via its official Docker image (no host install needed).
+
+```bash
+# Run manually
+./lint.sh
+
+# Automatically on rebuild (lint runs before docker build)
+./run-claude.sh --rebuild ~/Projects/my-project
+```
+
+### Pre-commit hook
+
+To lint automatically on every git commit:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This configures git to use the `.githooks/pre-commit` hook, which runs `lint.sh` and blocks the commit if the Dockerfile has lint issues.
 
 ## Updating Claude Code
 
