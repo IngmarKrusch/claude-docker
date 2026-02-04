@@ -109,7 +109,9 @@ Claude Max uses OAuth stored in macOS keychain under `"Claude Code-credentials"`
 
 ### Persistent state
 
-The named volume `claude-data` persists conversation history, settings, and credentials across runs. Token refreshes performed by Claude Code are preserved. Use `--fresh-creds` to force re-injection from keychain.
+The named volume `claude-data` persists conversation history, settings, and credentials across runs. Token refreshes performed by Claude Code are preserved.
+
+Expired credentials are automatically detected on container start and replaced with fresh ones from keychain. Use `--fresh-creds` to force re-injection even when credentials haven't expired.
 
 ## Updating Claude Code
 
@@ -137,10 +139,12 @@ security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null && ec
 
 ### Token expired / auth errors
 
-OAuth tokens expire. If auto-refresh fails:
+OAuth tokens expire. The sandbox automatically detects expired credentials and re-injects fresh ones from keychain on container start. You'll see `[sandbox] Credentials auto-refreshed (expired)` in the output.
 
-1. Re-run `claude login` on your Mac
-2. Re-launch with `--fresh-creds`:
+If auto-refresh fails or you see auth errors mid-session:
+
+1. Re-run `claude login` on your Mac to refresh keychain credentials
+2. Re-launch with `--fresh-creds` to force re-injection:
    ```bash
    ./run-claude.sh --fresh-creds ~/Projects/my-project
    ```

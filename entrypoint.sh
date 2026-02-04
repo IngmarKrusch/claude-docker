@@ -10,13 +10,27 @@ fi
 
 # Write credentials from environment variable into .claude directory
 CREDS_FILE="/home/claude/.claude/.credentials.json"
+
+# Check if existing credentials are expired
+EXPIRED=false
+if [ -f "$CREDS_FILE" ]; then
+    EXPIRES_AT=$(jq -r '.claudeAiOauth.expiresAt // 0' "$CREDS_FILE" 2>/dev/null || echo 0)
+    NOW_MS=$(($(date +%s) * 1000))
+    if [ "$EXPIRES_AT" -le "$NOW_MS" ] && [ "$EXPIRES_AT" -ne 0 ]; then
+        EXPIRED=true
+        echo "[sandbox] Existing credentials expired"
+    fi
+fi
+
 if [ -n "$CLAUDE_CREDENTIALS" ]; then
-    if [ ! -f "$CREDS_FILE" ] || [ "${FORCE_CREDENTIALS:-}" = "1" ]; then
+    if [ ! -f "$CREDS_FILE" ] || [ "${FORCE_CREDENTIALS:-}" = "1" ] || [ "$EXPIRED" = true ]; then
         echo "$CLAUDE_CREDENTIALS" > "$CREDS_FILE"
         chown claude: "$CREDS_FILE"
         chmod 600 "$CREDS_FILE"
         if [ "${FORCE_CREDENTIALS:-}" = "1" ]; then
             echo "[sandbox] Credentials force-refreshed from keychain"
+        elif [ "$EXPIRED" = true ]; then
+            echo "[sandbox] Credentials auto-refreshed (expired)"
         else
             echo "[sandbox] Credentials written (first run)"
         fi
