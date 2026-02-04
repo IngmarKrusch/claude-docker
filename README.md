@@ -70,34 +70,34 @@ dclaude --fresh-creds ~/Projects/my-project
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│ macOS Host                                      │
-│                                                 │
-│  run-claude.sh:                                 │
-│   1. Extract OAuth creds from macOS keychain    │
-│   2. Pass as env var CLAUDE_CREDENTIALS         │
-│   3. Launch container                           │
-│                                                 │
-│  ┌───────────────────────────────────────────┐   │
-│  │ Docker Container (gVisor runtime)        │   │
-│  │                                          │   │
-│  │  User: claude (UID 501, GID 20)          │   │
-│  │  Claude Code CLI + Node.js 22            │   │
-│  │  --allow-dangerously-skip-permissions     │   │
-│  │                                          │   │
-│  │  Mounts:                                 │   │
-│  │   /workspace ← project dir (rw)          │   │
-│  │   /tmp/host-gitconfig ← gitconfig (ro)   │   │
-│  │   ~/.claude ← claude-data volume (rw)    │   │
-│  │                                          │   │
-│  │  Credential flow:                        │   │
-│  │   env CLAUDE_CREDENTIALS                 │   │
-│  │     → entrypoint writes to               │   │
-│  │       ~/.claude/.credentials.json        │   │
-│  │     → env var unset before exec          │   │
-│  │     → Claude Code reads file normally    │   │
-│  └───────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│ macOS Host                                    │
+│                                               │
+│  run-claude.sh:                               │
+│   1. Extract OAuth creds from macOS keychain  │
+│   2. Pass as env var CLAUDE_CREDENTIALS       │
+│   3. Launch container                         │
+│                                               │
+│  ┌─────────────────────────────────────────┐  │
+│  │ Docker Container (gVisor runtime)       │  │
+│  │                                         │  │
+│  │  User: claude (UID 501, GID 20)         │  │
+│  │  Claude Code CLI + Node.js 22           │  │
+│  │  --allow-dangerously-skip-permissions   │  │
+│  │                                         │  │
+│  │  Mounts:                                │  │
+│  │   /workspace ← project dir (rw)         │  │
+│  │   /tmp/host-gitconfig ← gitconfig (ro)  │  │
+│  │   ~/.claude ← claude-data volume (rw)   │  │
+│  │                                         │  │
+│  │  Credential flow:                       │  │
+│  │   env CLAUDE_CREDENTIALS                │  │
+│  │     → entrypoint writes to              │  │
+│  │       ~/.claude/.credentials.json       │  │
+│  │     → env var unset before exec         │  │
+│  │     → Claude Code reads file normally   │  │
+│  └─────────────────────────────────────────┘  │
+└───────────────────────────────────────────────┘
 ```
 
 ### Credential Flow
