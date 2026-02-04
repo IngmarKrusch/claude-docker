@@ -144,6 +144,8 @@ Claude Code requires internet access to call the Anthropic API, so `--network=no
 
 **Practical risk**: Claude Code running `curl` or `wget` to arbitrary URLs. This is the same risk as running Claude Code on your host Mac with `--allow-dangerously-skip-permissions`. The sandbox adds filesystem isolation on top, which is the main value.
 
+**Host-level mitigation**: Tools like [Little Snitch](https://www.obdev.at/products/littlesnitch/) or [LuLu](https://objective-see.org/products/lulu.html) can restrict outbound connections from Docker containers to an allowlist (e.g., `*.anthropic.com`, `github.com`, `registry.npmjs.org`). This provides defense-in-depth while the in-container iptables firewall remains non-functional under gVisor.
+
 ### Firewall script (included but inactive)
 
 The `init-firewall.sh` script from [Anthropic's official devcontainer](https://github.com/anthropics/claude-code/blob/main/.devcontainer/init-firewall.sh) is included in the image and attempted at startup. When it fails (as it does with gVisor), the entrypoint logs a warning and continues. If Docker Desktop or gVisor adds iptables support in the future, the firewall will activate automatically.
