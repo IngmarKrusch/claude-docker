@@ -83,8 +83,7 @@ dclaude --fresh-creds ~/Projects/my-project
 │  │                                          │   │
 │  │  User: claude (UID 501, GID 20)          │   │
 │  │  Claude Code CLI + Node.js 22            │   │
-│  │  --dangerously-skip-permissions           │   │
-│  │  --allow-dangerously-skip-permissions    │   │
+│  │  --allow-dangerously-skip-permissions     │   │
 │  │                                          │   │
 │  │  Mounts:                                 │   │
 │  │   /workspace ← project dir (rw)          │   │
@@ -130,7 +129,7 @@ docker volume rm claude-data
 | **Non-root user** | Container runs as UID 501 (matching your macOS user), not root. |
 | **Gitconfig isolation** | Host `.gitconfig` is mounted read-only to a staging path, then copied into the container. Claude gets your git identity but cannot modify your host git config. |
 | **Credential scoping** | OAuth credentials are written to a file inside the container and the env var is cleared. Credentials persist on the named volume so token refreshes survive across runs. |
-| **`--dangerously-skip-permissions --allow-dangerously-skip-permissions`** | These flags are safe inside the sandbox. They tell Claude Code to skip its own permission prompts (tool approvals), which makes sense because the container itself is the security boundary. |
+| **`--allow-dangerously-skip-permissions`** | This flag is safe inside the sandbox. It tells Claude Code to skip its own permission prompts (tool approvals), which makes sense because the container itself is the security boundary. |
 
 ### What is NOT sandboxed: network
 
@@ -143,7 +142,7 @@ This is a known limitation. The Anthropic devcontainer includes an iptables-base
 
 Claude Code requires internet access to call the Anthropic API, so `--network=none` is not viable.
 
-**Practical risk**: Claude Code running `curl` or `wget` to arbitrary URLs. This is the same risk as running Claude Code on your host Mac with `--dangerously-skip-permissions --allow-dangerously-skip-permissions`. The sandbox adds filesystem isolation on top, which is the main value.
+**Practical risk**: Claude Code running `curl` or `wget` to arbitrary URLs. This is the same risk as running Claude Code on your host Mac with `--allow-dangerously-skip-permissions`. The sandbox adds filesystem isolation on top, which is the main value.
 
 ### Firewall script (included but inactive)
 

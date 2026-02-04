@@ -71,4 +71,4 @@ docker run --rm -it \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v claude-data:/home/claude/.claude \
     "$IMAGE_NAME" \
-    claude --dangerously-skip-permissions --allow-dangerously-skip-permissions
+    claude --allow-dangerously-skip-permissions
