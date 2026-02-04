@@ -1,8 +1,7 @@
-FROM node:22-bookworm-slim
+FROM debian:bookworm-slim
 
 ARG USER_ID=501
 ARG GROUP_ID=20
-ARG CLAUDE_CODE_VERSION=latest
 
 # System dependencies (firewall + dev tools)
 # hadolint ignore=DL3008
@@ -15,8 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN (groupadd -g ${GROUP_ID} claude 2>/dev/null || true) \
     && useradd -m -l -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash claude
 
-# Install Claude Code
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+# Install Claude Code (native binary, no Node.js needed)
+ENV DISABLE_AUTOUPDATER=1
+# hadolint ignore=DL4006
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && cp -L /root/.local/bin/claude /usr/local/bin/claude \
+    && rm -rf /root/.local/share/claude /root/.local/bin/claude \
+    && mkdir -p /home/claude/.local/bin \
+    && ln -s /usr/local/bin/claude /home/claude/.local/bin/claude \
+    && chown -R ${USER_ID}:${GROUP_ID} /home/claude/.local
 
 # Firewall script (from Anthropic's official devcontainer)
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh

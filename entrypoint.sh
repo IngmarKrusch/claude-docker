@@ -56,5 +56,6 @@ export USER=claude
 export LOGNAME=claude
 export HOME=/home/claude
 export SHELL=/bin/bash
+export PATH="/home/claude/.local/bin:$PATH"
 
 exec gosu claude "$@"

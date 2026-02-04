@@ -22,7 +22,7 @@ cd ~/Projects/some-project
 ~/Projects/claude-docker/lint.sh
 ```
 
-The first run builds the Docker image (installs Node 22, Claude Code, tools). Subsequent runs reuse the cached image.
+The first run builds the Docker image (installs Claude Code native binary and tools). Subsequent runs reuse the cached image.
 
 ## Working With Projects
 
@@ -85,7 +85,7 @@ dclaude --fresh-creds ~/Projects/my-project
 │  │ Docker Container (gVisor runtime)        │   │
 │  │                                          │   │
 │  │  Starts as root → gosu drops to claude    │   │
-│  │  Claude Code CLI + Node.js 22            │   │
+│  │  Claude Code CLI (native binary)          │   │
 │  │  --allow-dangerously-skip-permissions     │   │
 │  │                                          │   │
 │  │  Mounts:                                 │   │
@@ -159,16 +159,17 @@ The `init-firewall.sh` script from [Anthropic's official devcontainer](https://g
 ### Dockerfile
 
 ```
-FROM node:22-bookworm-slim
+FROM debian:bookworm-slim
 ```
 
-- Debian Bookworm slim base with Node.js 22
+- Debian Bookworm slim base (no Node.js needed)
 - System packages: `git`, `curl`, `gosu`, `zsh`, `fzf`, `ripgrep`, `jq`, `aggregate`, `ca-certificates`, `iptables`, `ipset`, `dnsutils`, `iproute2`
 - User `claude` created with host UID/GID (default 501:20, macOS standard)
-- Claude Code installed globally via npm (`@anthropic-ai/claude-code@latest`)
+- Claude Code installed as a native binary via `https://claude.ai/install.sh`
+- `DISABLE_AUTOUPDATER=1`: container images are immutable; updates happen via `--rebuild`
 - Firewall and entrypoint scripts copied in
 - No `USER` directive: container starts as root so the entrypoint can run the firewall script directly, then drops to `claude` via `gosu`
-- Build args: `USER_ID`, `GROUP_ID`, `CLAUDE_CODE_VERSION`
+- Build args: `USER_ID`, `GROUP_ID`
 
 ### entrypoint.sh
 
@@ -241,15 +242,7 @@ To update Claude Code inside the container to the latest version:
 ~/Projects/claude-docker/run-claude.sh --rebuild
 ```
 
-This rebuilds the image with `--no-cache`, which pulls the latest `@anthropic-ai/claude-code` from npm.
-
-To pin a specific version, edit the Dockerfile:
-
-```dockerfile
-ARG CLAUDE_CODE_VERSION=1.0.20
-```
-
-Then rebuild.
+This rebuilds the image with `--no-cache`, which re-runs the native installer and pulls the latest Claude Code binary.
 
 ## Troubleshooting
 
@@ -333,5 +326,5 @@ This removes conversation history, settings, and cached data. Credentials are re
 
 - macOS with Docker Desktop installed
 - gVisor runtime configured in Docker Desktop (recommended, not required)
-- Claude Code installed on host (`npm install -g @anthropic-ai/claude-code`)
+- Claude Code installed on host (via `curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials in keychain)
