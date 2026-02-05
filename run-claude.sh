@@ -154,9 +154,10 @@ if [ "$REBUILD" = true ]; then
     echo "Linting Dockerfile..."
     "$SCRIPT_DIR/lint.sh"
     echo "Rebuilding sandbox image..."
-    docker build --no-cache \
+    docker build \
         --build-arg USER_ID=$(id -u) \
         --build-arg GROUP_ID=$(id -g) \
+        --build-arg CACHE_BUST=$(date +%s) \
         -t "$IMAGE_NAME" \
         "$SCRIPT_DIR"
 elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
