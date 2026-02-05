@@ -134,8 +134,15 @@ export HOME=/home/claude
 export SHELL=/bin/bash
 export PATH="/home/claude/.local/bin:$PATH"
 
-# Drop all capabilities from the bounding set before exec'ing claude.
-# The entrypoint runs as root (needs NET_ADMIN for iptables, CHOWN/SETUID/SETGID
-# for file ownership), but these caps must not remain in the bounding set after
-# privilege drop — a future kernel vuln could otherwise re-acquire them.
-exec setpriv --bounding-set=-all -- gosu claude "$@"
+# Drop privileges and clear the bounding set in a single setpriv call.
+# We can't exec gosu after clearing the bounding set because gosu needs
+# CAP_SETUID/SETGID which are lost at the execve boundary. setpriv handles
+# both: uid/gid change uses current effective caps, then the empty bounding
+# set takes effect when exec'ing the final command.
+exec setpriv \
+    --reuid="$(id -u claude)" \
+    --regid="$(id -g claude)" \
+    --init-groups \
+    --inh-caps=-all \
+    --bounding-set=-all \
+    -- "$@"
