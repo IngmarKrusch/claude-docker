@@ -30,9 +30,11 @@ Options:
                           then run this to apply changes without restarting.
 
 Security layers:
-  Read-only rootfs, custom seccomp allowlist, all capabilities dropped
-  (except CHOWN/SETUID/SETGID/NET_ADMIN/NET_RAW), iptables firewall
-  (allowlist-only), no-new-privileges, and privilege drop to UID 501 via gosu.
+  Read-only rootfs, custom seccomp allowlist (ptrace blocked), all capabilities
+  dropped (except CHOWN/SETUID/SETGID/NET_ADMIN/NET_RAW — bounding set cleared
+  after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
+  no-new-privileges, resource limits (memory/pids), no setuid binaries, and
+  privilege drop to UID 501 via gosu.
 
 Runtime compatibility:
   OrbStack (recommended):
@@ -202,6 +204,9 @@ docker run --rm -it \
     --cap-add=NET_RAW \
     --security-opt=no-new-privileges \
     --security-opt seccomp="$SCRIPT_DIR/seccomp-profile.json" \
+    --pids-limit=4096 \
+    --memory=8g \
+    --memory-swap=8g \
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,size=512m \
     --tmpfs /home/claude/.config:rw,nosuid,size=64m \

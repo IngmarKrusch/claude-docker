@@ -45,6 +45,8 @@ if [ -n "$CLAUDE_CREDENTIALS" ]; then
     else
         log "[sandbox] Using existing credentials from volume (pass --fresh-creds to override)"
     fi
+    # Clear credentials from memory: unset and overwrite the variable
+    CLAUDE_CREDENTIALS="$(head -c ${#CLAUDE_CREDENTIALS} /dev/urandom | base64)"
     unset CLAUDE_CREDENTIALS
     unset FORCE_CREDENTIALS
 elif [ -f "$CREDS_FILE" ]; then
@@ -53,6 +55,11 @@ elif [ -f "$CREDS_FILE" ]; then
 else
     log "[sandbox] Warning: No credentials found. Run 'claude login' or mount credentials."
 fi
+
+# Deferred credential scrub: remove the plaintext credentials file after Claude Code
+# has had time to read and cache them. This limits the window where a malicious child
+# process can read the file from disk.
+(sleep 15 && chmod 000 "$CREDS_FILE" 2>/dev/null) &
 
 # Ensure Claude Code's config file lives on the volume.
 # Without this, config is written to ~/.claude.json (outside the volume mount)
@@ -86,4 +93,8 @@ export HOME=/home/claude
 export SHELL=/bin/bash
 export PATH="/home/claude/.local/bin:$PATH"
 
-exec gosu claude "$@"
+# Drop all capabilities from the bounding set before exec'ing claude.
+# The entrypoint runs as root (needs NET_ADMIN for iptables, CHOWN/SETUID/SETGID
+# for file ownership), but these caps must not remain in the bounding set after
+# privilege drop — a future kernel vuln could otherwise re-acquire them.
+exec setpriv --bounding-set=-all -- gosu claude "$@"

@@ -24,11 +24,23 @@ else
     echo "No Docker DNS rules to restore"
 fi
 
-# First allow DNS and localhost before any restrictions
-# Allow outbound DNS only to Docker's internal resolver (prevents DNS tunneling to arbitrary servers)
-iptables -A OUTPUT -p udp --dport 53 -d 127.0.0.11 -j ACCEPT
-# Allow inbound DNS responses from Docker's internal resolver
-iptables -A INPUT -p udp --sport 53 -s 127.0.0.11 -j ACCEPT
+# Auto-detect the actual DNS resolver (OrbStack uses 0.250.250.200, Docker Desktop uses 127.0.0.11)
+DNS_RESOLVER=$(awk '/^nameserver/ { print $2; exit }' /etc/resolv.conf)
+if [ -z "$DNS_RESOLVER" ]; then
+    DNS_RESOLVER="127.0.0.11"
+    echo "WARNING: Could not detect DNS resolver, falling back to $DNS_RESOLVER"
+fi
+echo "DNS resolver detected as: $DNS_RESOLVER"
+
+# Allow outbound DNS only to the detected resolver (prevents DNS tunneling to arbitrary servers)
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
+# Block DNS to ALL other destinations (must come before general allowlist rules)
+iptables -A OUTPUT -p udp --dport 53 -j DROP
+iptables -A OUTPUT -p tcp --dport 53 -j DROP
+# Allow inbound DNS responses from the detected resolver
+iptables -A INPUT -p udp --sport 53 -s "$DNS_RESOLVER" -j ACCEPT
+iptables -A INPUT -p tcp --sport 53 -s "$DNS_RESOLVER" -j ACCEPT
 # Allow localhost
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT

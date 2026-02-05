@@ -1,5 +1,5 @@
 {
-  "comment": "Custom seccomp profile for Claude Code sandbox. Based on Docker's default profile with additional restrictions: io_uring (already blocked by default), userfaultfd (already blocked by default), personality, process_vm_readv/writev, and perf_event_open removed.",
+  "comment": "Custom seccomp profile for Claude Code sandbox. Based on Docker's default profile with additional restrictions: io_uring (already blocked by default), userfaultfd (already blocked by default), personality, process_vm_readv/writev, perf_event_open, and ptrace removed.",
   "defaultAction": "SCMP_ACT_ERRNO",
   "defaultErrnoRet": 1,
   "archMap": [
@@ -84,12 +84,6 @@
         "vmsplice", "wait4", "waitid", "waitpid", "write", "writev"
       ],
       "action": "SCMP_ACT_ALLOW"
-    },
-    {
-      "comment": "ptrace allowed with kernel >= 4.8 (process_vm_readv/writev REMOVED)",
-      "names": ["ptrace"],
-      "action": "SCMP_ACT_ALLOW",
-      "includes": { "minKernel": "4.8" }
     },
     {
       "comment": "socket: block AF_VSOCK (40) only",
@@ -204,8 +198,8 @@
       "includes": { "caps": ["CAP_SYS_PACCT"] }
     },
     {
-      "comment": "Requires CAP_SYS_PTRACE (process_vm_readv/writev REMOVED)",
-      "names": ["kcmp", "pidfd_getfd", "process_madvise", "ptrace"],
+      "comment": "Requires CAP_SYS_PTRACE (process_vm_readv/writev and ptrace REMOVED)",
+      "names": ["kcmp", "pidfd_getfd", "process_madvise"],
       "action": "SCMP_ACT_ALLOW",
       "includes": { "caps": ["CAP_SYS_PTRACE"] }
     },

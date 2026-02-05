@@ -7,7 +7,7 @@ ARG GROUP_ID=20
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl gosu zsh fzf ripgrep jq aggregate ca-certificates \
-    iptables ipset dnsutils iproute2 \
+    iptables ipset dnsutils iproute2 libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user matching host UID/GID
@@ -29,6 +29,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
     && mkdir -p /home/claude/.local/bin \
     && ln -s /usr/local/bin/claude /home/claude/.local/bin/claude \
     && chown -R ${USER_ID}:${GROUP_ID} /home/claude/.local
+
+# Strip setuid/setgid bits from all binaries (NoNewPrivs prevents exploitation,
+# but removing them reduces attack surface further)
+RUN find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null; \
+    find / -perm -2000 -type f -exec chmod g-s {} + 2>/dev/null
 
 # Firewall scripts
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
