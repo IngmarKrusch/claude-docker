@@ -37,10 +37,44 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 | **Filesystem** | Read-only rootfs. Only `/workspace` and `~/.claude` are writable. `/tmp` is a noexec tmpfs. |
 | **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, and other high-risk syscalls. |
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID (entrypoint setup + gosu) and NET_ADMIN/NET_RAW (firewall). |
-| **Network** | iptables allowlist: only Anthropic API, GitHub, npm, and a few other required services. All other outbound traffic blocked. |
+| **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `gosu`. No `sudo` in image. `no-new-privileges` prevents escalation. |
 | **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
+
+## Firewall Configuration
+
+The container's outbound network allowlist is defined in `firewall-allowlist.conf` in the project directory. The file is bind-mounted read-only into the container — Claude cannot modify it.
+
+### Config format
+
+```
+# One domain per line. Comments start with #. Empty lines ignored.
+# @github fetches IP ranges from api.github.com/meta
+
+@github
+api.anthropic.com
+registry.npmjs.org
+sentry.io
+```
+
+### Adding or removing domains
+
+Edit `firewall-allowlist.conf` on the host, then apply to running containers:
+
+```bash
+# Edit the config
+echo "httpbin.org" >> firewall-allowlist.conf
+
+# Reload all running containers
+./run-claude.sh --reload-firewall
+```
+
+The reload performs an atomic ipset swap — no traffic interruption and no window where all traffic is blocked. If a domain fails to resolve, it is skipped with a warning and all other domains still load.
+
+### `@github` keyword
+
+The special `@github` entry fetches GitHub's published IP ranges from their [meta API](https://api.github.com/meta), aggregates the CIDRs, and adds them to the allowlist. This covers `github.com`, `api.github.com`, `raw.githubusercontent.com`, and other GitHub services.
 
 ## Usage
 
@@ -62,6 +96,7 @@ These are consumed by `run-claude.sh` itself:
 - `--fresh-creds` — Overwrite credentials with current keychain values
 - `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
+- `--reload-firewall` — Reload `firewall-allowlist.conf` in all running containers
 
 ### Passing arguments to Claude Code
 
@@ -71,7 +106,7 @@ Everything that isn't a script flag or the project directory is passed through t
 ./run-claude.sh ../my-project --continue               # Resume last conversation
 ./run-claude.sh --continue                              # Resume (current directory)
 ./run-claude.sh ../foo -p "fix the tests"               # One-shot prompt
-./run-claude.sh ../foo --dangerously-skip-permissions   # Bypass permission prompts
+./run-claude.sh ../foo --allow-dangerously-skip-permissions   # Allow Bypass permission prompts
 ./run-claude.sh ../foo --resume SESSION_ID               # Resume specific session
 ```
 
@@ -243,7 +278,9 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 - **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, `gosu` for privilege drop
 - **entrypoint.sh** — Firewall init, credential setup, gitconfig (on volume), privilege drop
 - **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch
-- **init-firewall.sh** — iptables allowlist for outbound network filtering
+- **init-firewall.sh** — iptables chain setup, calls `reload-firewall.sh`, connectivity verification
+- **reload-firewall.sh** — Reads `firewall-allowlist.conf`, resolves domains, atomic ipset swap
+- **firewall-allowlist.conf** — Configurable domain allowlist for the container firewall
 - **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus high-risk syscalls)
 - **lint.sh** — Runs Hadolint on Dockerfile via Docker
 - **.githooks/pre-commit** — Runs lint on commit; enable with `git config core.hooksPath .githooks`

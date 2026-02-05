@@ -30,9 +30,10 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
     && ln -s /usr/local/bin/claude /home/claude/.local/bin/claude \
     && chown -R ${USER_ID}:${GROUP_ID} /home/claude/.local
 
-# Firewall script (from Anthropic's official devcontainer)
+# Firewall scripts
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
-RUN chmod +x /usr/local/bin/init-firewall.sh
+COPY reload-firewall.sh /usr/local/bin/reload-firewall.sh
+RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/reload-firewall.sh
 
 # Entrypoint
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -25,6 +25,9 @@ Options:
                           the standard runc runtime is used, which is best for
                           OrbStack. Note: the iptables firewall does not work
                           with gVisor's virtualized network stack.
+  --reload-firewall       Reload the firewall allowlist in all running
+                          claude-sandbox containers. Edit firewall-allowlist.conf
+                          then run this to apply changes without restarting.
 
 Security layers:
   Read-only rootfs, custom seccomp allowlist, all capabilities dropped
@@ -49,7 +52,8 @@ Argument routing:
   is an existing directory becomes PROJECT_DIR. All remaining arguments go
   to claude as CLAUDE_ARGS.
 
-  Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --with-gvisor
+  Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --with-gvisor,
+                 --reload-firewall
   Claude flags:  --continue, --resume, -p, --allowedTools, --model, etc.
 
 Examples:
@@ -60,7 +64,8 @@ Examples:
   ./run-claude.sh ../my-project --continue     Continue last conversation
   ./run-claude.sh --continue                   Continue (current directory)
   ./run-claude.sh ../foo -p "fix the tests"    Run a one-shot prompt
-  ./run-claude.sh ../foo --dangerously-skip-permissions  Bypass permissions
+  ./run-claude.sh ../foo --allow-dangerously-skip-permissions  Bypass permissions
+  ./run-claude.sh --reload-firewall            Reload firewall in all containers
 EOF
     exit 0
 }
@@ -70,6 +75,7 @@ REBUILD=false
 FRESH_CREDS=false
 ISOLATE_DATA=false
 WITH_GVISOR=false
+RELOAD_FIREWALL=false
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -78,9 +84,36 @@ for arg in "$@"; do
         --fresh-creds) FRESH_CREDS=true ;;
         --isolate-claude-data) ISOLATE_DATA=true ;;
         --with-gvisor) WITH_GVISOR=true ;;
+        --reload-firewall) RELOAD_FIREWALL=true ;;
         *) ARGS+=("$arg") ;;
     esac
 done
+
+# Handle --reload-firewall: exec into all running containers and exit
+if [ "$RELOAD_FIREWALL" = true ]; then
+    CONTAINERS=$(docker ps -q -f ancestor=claude-sandbox)
+    if [ -z "$CONTAINERS" ]; then
+        echo "[sandbox] No running claude-sandbox containers found"
+        exit 1
+    fi
+    FAIL=0
+    for cid in $CONTAINERS; do
+        SHORT="${cid:0:12}"
+        echo "[sandbox] Reloading firewall in container $SHORT..."
+        if docker exec "$cid" /usr/local/bin/reload-firewall.sh; then
+            echo "[sandbox] Container $SHORT: OK"
+        else
+            echo "[sandbox] Container $SHORT: FAILED"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+    if [ "$FAIL" -gt 0 ]; then
+        echo "[sandbox] $FAIL container(s) failed to reload"
+        exit 1
+    fi
+    echo "[sandbox] All containers reloaded successfully"
+    exit 0
+fi
 
 # First positional arg that is a directory becomes PROJECT_DIR; rest go to claude
 PROJECT_DIR="."
@@ -177,6 +210,7 @@ docker run --rm -it \
     $FORCE_CREDS_FLAG \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
+    -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     -v "$CLAUDE_DATA_MOUNT" \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
