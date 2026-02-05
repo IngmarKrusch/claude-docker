@@ -4,11 +4,11 @@ set -e
 
 usage() {
     cat <<'EOF'
-Usage: run-claude.sh [OPTIONS] [PROJECT_DIR]
+Usage: run-claude.sh [OPTIONS] [PROJECT_DIR] [CLAUDE_ARGS...]
 
 Launch Claude Code in a hardened Docker container. Credentials are extracted
 from the macOS keychain automatically. If PROJECT_DIR is omitted, the current
-directory is used.
+directory is used. Any additional arguments are passed through to Claude Code.
 
 Options:
   -h, --help              Show this help message and exit
@@ -43,11 +43,24 @@ Runtime compatibility:
     has permission issues with bind-mounted ~/.claude/. Uses a named Docker
     volume instead. To reset state: docker volume rm claude-data
 
+Argument routing:
+  Script options (--rebuild, --fresh-creds, etc.) are consumed by the script.
+  Everything else is passed through to Claude Code. The first argument that
+  is an existing directory becomes PROJECT_DIR. All remaining arguments go
+  to claude as CLAUDE_ARGS.
+
+  Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --with-gvisor
+  Claude flags:  --continue, --resume, -p, --allowedTools, --model, etc.
+
 Examples:
   ./run-claude.sh ~/Projects/my-project        Run on a specific project
   ./run-claude.sh                              Run on the current directory
-  ./run-claude.sh --rebuild                    Rebuild image, then run
+  ./run-claude.sh --rebuild ~/Projects/x       Rebuild image, then run
   ./run-claude.sh --fresh-creds ~/Projects/x   Force-refresh credentials
+  ./run-claude.sh ../my-project --continue     Continue last conversation
+  ./run-claude.sh --continue                   Continue (current directory)
+  ./run-claude.sh ../foo -p "fix the tests"    Run a one-shot prompt
+  ./run-claude.sh ../foo --dangerously-skip-permissions  Bypass permissions
 EOF
     exit 0
 }
@@ -69,7 +82,18 @@ for arg in "$@"; do
     esac
 done
 
-PROJECT_DIR="${ARGS[0]:-.}"
+# First positional arg that is a directory becomes PROJECT_DIR; rest go to claude
+PROJECT_DIR="."
+CLAUDE_ARGS=()
+DIR_FOUND=false
+for arg in "${ARGS[@]}"; do
+    if [ "$DIR_FOUND" = false ] && [ -d "$arg" ]; then
+        PROJECT_DIR="$arg"
+        DIR_FOUND=true
+    else
+        CLAUDE_ARGS+=("$arg")
+    fi
+done
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 IMAGE_NAME="claude-sandbox"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -155,4 +179,4 @@ docker run --rm -it \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$CLAUDE_DATA_MOUNT" \
     "$IMAGE_NAME" \
-    claude --allow-dangerously-skip-permissions
+    claude "${CLAUDE_ARGS[@]}"

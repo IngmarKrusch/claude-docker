@@ -54,12 +54,28 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 
 Only the specified directory is mounted at `/workspace`. Claude cannot see other directories on your Mac.
 
-### Flags
+### Script flags
+
+These are consumed by `run-claude.sh` itself:
 
 - `--rebuild` — Rebuild image with `--no-cache` (runs lint first)
 - `--fresh-creds` — Overwrite credentials with current keychain values
 - `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
+
+### Passing arguments to Claude Code
+
+Everything that isn't a script flag or the project directory is passed through to `claude`:
+
+```bash
+./run-claude.sh ../my-project --continue               # Resume last conversation
+./run-claude.sh --continue                              # Resume (current directory)
+./run-claude.sh ../foo -p "fix the tests"               # One-shot prompt
+./run-claude.sh ../foo --dangerously-skip-permissions   # Bypass permission prompts
+./run-claude.sh ../foo --resume SESSION_ID               # Resume specific session
+```
+
+The first argument that is an existing directory becomes the project dir. All other non-script arguments go to claude. Run `./run-claude.sh -h` for full details.
 
 ### Shell alias
 
@@ -69,7 +85,7 @@ Add to `~/.zshrc` or `~/.bashrc`:
 alias dclaude='/path/to/claude-docker/run-claude.sh'
 ```
 
-Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild`
+Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild ~/Projects/my-project --continue`
 
 ## How It Works
 
