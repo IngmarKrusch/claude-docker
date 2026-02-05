@@ -82,6 +82,27 @@ if [ -f /tmp/host-gitconfig ]; then
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
 
+# Configure GitHub credentials for git push (in-memory only, never written to disk)
+if [ -n "$GITHUB_TOKEN" ]; then
+    CACHE_SOCK="/tmp/.git-credential-cache/sock"
+    mkdir -p "$(dirname "$CACHE_SOCK")"
+    chown claude: "$(dirname "$CACHE_SOCK")"
+    chmod 700 "$(dirname "$CACHE_SOCK")"
+
+    # Configure git to use the in-memory credential cache
+    HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
+        git config --global credential.helper "cache --timeout=86400 --socket=$CACHE_SOCK"
+
+    # Feed token into cache daemon (run as claude so the socket is owned by claude)
+    printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n' "$GITHUB_TOKEN" | \
+        gosu claude env HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git credential approve
+
+    # Overwrite and clear env var (defense against /proc/*/environ reads)
+    GITHUB_TOKEN="$(head -c ${#GITHUB_TOKEN} /dev/urandom | base64)"
+    unset GITHUB_TOKEN
+    log "[sandbox] GitHub credentials configured (in-memory cache)"
+fi
+
 # Fix ownership on tmpfs mounts (Docker creates them as root)
 chown claude: /home/claude/.npm /home/claude/.config 2>/dev/null || true
 

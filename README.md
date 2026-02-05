@@ -9,6 +9,7 @@ Run Claude Code CLI in a hardened Docker container with defense-in-depth isolati
   - **Docker Desktop** — works with `--isolate-claude-data` flag
 - Claude Code installed on host (`curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials stored in keychain)
+- (Optional) GitHub CLI authenticated (`gh auth login`) — enables `git push` from inside the container
 
 ## Quick Start
 
@@ -39,7 +40,7 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID (entrypoint setup + gosu) and NET_ADMIN/NET_RAW (firewall). |
 | **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `gosu`. No `sudo` in image. `no-new-privileges` prevents escalation. |
-| **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). |
+| **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
 
 ## Firewall Configuration
@@ -111,6 +112,18 @@ Everything that isn't a script flag or the project directory is passed through t
 ```
 
 The first argument that is an existing directory becomes the project dir. All other non-script arguments go to claude. Run `./run-claude.sh -h` for full details.
+
+### Git push from the container
+
+If the GitHub CLI (`gh`) is authenticated on your host, the sandbox automatically extracts your GitHub token and configures `git credential-cache` inside the container. This enables `git push` over HTTPS without any manual setup.
+
+The token **never touches disk** — it lives only in the credential-cache daemon's memory. The cache socket resides on `/tmp` (tmpfs), which is ephemeral and gone when the container exits. The `GITHUB_TOKEN` env var is overwritten with random data and unset before Claude Code starts.
+
+Requirements:
+- `gh` CLI installed on host
+- Authenticated via `gh auth login`
+
+If `gh` is not installed or not authenticated, the container starts normally — git push just won't have credentials pre-configured.
 
 ### Shell alias
 

@@ -141,6 +141,12 @@ if [ -z "$CREDS" ]; then
     exit 1
 fi
 
+# Extract GitHub token from host (for git push inside container)
+GH_TOKEN=$(gh auth token 2>/dev/null || true)
+if [ -n "$GH_TOKEN" ]; then
+    echo "[sandbox] GitHub token found"
+fi
+
 # Build image if needed (or forced with --rebuild)
 if [ "$REBUILD" = true ]; then
     echo "Linting Dockerfile..."
@@ -179,6 +185,11 @@ if [ "$FRESH_CREDS" = true ]; then
     FORCE_CREDS_FLAG="-e FORCE_CREDENTIALS=1"
 fi
 
+GH_TOKEN_FLAG=""
+if [ -n "$GH_TOKEN" ]; then
+    GH_TOKEN_FLAG="-e GITHUB_TOKEN=$GH_TOKEN"
+fi
+
 # Determine Claude data mount: bind-mount host ~/.claude by default, or use named volume with --isolate-claude-data
 if [ "$ISOLATE_DATA" = true ]; then
     CLAUDE_DATA_MOUNT="claude-data:/home/claude/.claude"
@@ -213,6 +224,7 @@ docker run --rm -it \
     --tmpfs /home/claude/.npm:rw,exec,nosuid,size=256m \
     -e CLAUDE_CREDENTIALS="$CREDS" \
     $FORCE_CREDS_FLAG \
+    $GH_TOKEN_FLAG \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
