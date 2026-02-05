@@ -25,14 +25,10 @@ else
 fi
 
 # First allow DNS and localhost before any restrictions
-# Allow outbound DNS
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-# Allow inbound DNS responses
-iptables -A INPUT -p udp --sport 53 -j ACCEPT
-# Allow outbound SSH
-iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT
-# Allow inbound SSH responses
-iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
+# Allow outbound DNS only to Docker's internal resolver (prevents DNS tunneling to arbitrary servers)
+iptables -A OUTPUT -p udp --dport 53 -d 127.0.0.11 -j ACCEPT
+# Allow inbound DNS responses from Docker's internal resolver
+iptables -A INPUT -p udp --sport 53 -s 127.0.0.11 -j ACCEPT
 # Allow localhost
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
@@ -66,7 +62,9 @@ iptables -P OUTPUT DROP
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Then allow only specific outbound traffic to allowed domains
+# Allow outbound SSH only to allowlisted destinations (prevents tunneling to arbitrary servers)
+iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
+# Allow other outbound traffic to allowed domains (HTTPS, etc.)
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 
 # Explicitly REJECT all other outbound traffic for immediate feedback
