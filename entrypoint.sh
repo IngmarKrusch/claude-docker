@@ -75,6 +75,9 @@ if [ -f /tmp/host-gitconfig ]; then
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
 
+# Fix ownership on tmpfs mounts (Docker creates them as root)
+chown claude: /home/claude/.npm /home/claude/.config 2>/dev/null || true
+
 # Set user environment variables that 'USER claude' in Dockerfile would have
 # provided. gosu only changes uid/gid, it does not set these.
 export USER=claude
