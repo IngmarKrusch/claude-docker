@@ -65,13 +65,15 @@ if [ ! -f "$CONFIG_FILE" ]; then
     chown claude: "$CONFIG_FILE"
 fi
 
-# Build writable .gitconfig that includes host gitconfig + safe.directory
+# Build writable .gitconfig on the volume (rootfs is read-only)
+GITCONFIG="/home/claude/.claude/.gitconfig"
 if [ -f /tmp/host-gitconfig ]; then
-    cp /tmp/host-gitconfig /home/claude/.gitconfig
-    chown claude: /home/claude/.gitconfig
-    HOME=/home/claude git config --global --add safe.directory /workspace
+    cp /tmp/host-gitconfig "$GITCONFIG"
+    chown claude: "$GITCONFIG"
+    HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git config --global --add safe.directory /workspace
     log "[sandbox] Git configured"
 fi
+export GIT_CONFIG_GLOBAL="$GITCONFIG"
 
 # Set user environment variables that 'USER claude' in Dockerfile would have
 # provided. gosu only changes uid/gid, it does not set these.

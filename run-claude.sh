@@ -2,6 +2,55 @@
 # run-claude.sh - Launch Claude Code in a sandboxed Docker container
 set -e
 
+usage() {
+    cat <<'EOF'
+Usage: run-claude.sh [OPTIONS] [PROJECT_DIR]
+
+Launch Claude Code in a hardened Docker container. Credentials are extracted
+from the macOS keychain automatically. If PROJECT_DIR is omitted, the current
+directory is used.
+
+Options:
+  -h, --help              Show this help message and exit
+  --rebuild               Rebuild the Docker image from scratch (runs lint
+                          first, uses --no-cache). Use after editing the
+                          Dockerfile or to pull a new Claude Code version.
+  --fresh-creds           Force re-inject credentials from the macOS keychain,
+                          even if unexpired credentials exist in the container.
+                          Useful after running 'claude login' on the host.
+  --isolate-claude-data   Use a named Docker volume ('claude-data') instead of
+                          bind-mounting the host's ~/.claude/ directory.
+                          Required for Docker Desktop (see below).
+  --no-gvisor             Skip gVisor runtime even if available. All other
+                          hardening layers (seccomp, read-only rootfs,
+                          capabilities drop, firewall) remain active.
+
+Security layers:
+  Read-only rootfs, custom seccomp allowlist, all capabilities dropped
+  (except CHOWN/SETUID/SETGID/NET_ADMIN/NET_RAW), iptables firewall
+  (allowlist-only), no-new-privileges, and privilege drop to UID 501 via gosu.
+
+Runtime compatibility:
+  OrbStack (recommended):
+    ./run-claude.sh ~/Projects/my-project
+    Bind-mounts ~/.claude/ for shared state with the host. Firewall and all
+    hardening layers work out of the box.
+
+  Docker Desktop:
+    ./run-claude.sh --isolate-claude-data ~/Projects/my-project
+    Requires --isolate-claude-data because Docker Desktop's file sharing
+    has permission issues with bind-mounted ~/.claude/. Uses a named Docker
+    volume instead. To reset state: docker volume rm claude-data
+
+Examples:
+  ./run-claude.sh ~/Projects/my-project        Run on a specific project
+  ./run-claude.sh                              Run on the current directory
+  ./run-claude.sh --rebuild                    Rebuild image, then run
+  ./run-claude.sh --fresh-creds ~/Projects/x   Force-refresh credentials
+EOF
+    exit 0
+}
+
 # Parse flags
 REBUILD=false
 FRESH_CREDS=false
@@ -10,6 +59,7 @@ NO_GVISOR=false
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
+        -h|--help) usage ;;
         --rebuild) REBUILD=true ;;
         --fresh-creds) FRESH_CREDS=true ;;
         --isolate-claude-data) ISOLATE_DATA=true ;;
@@ -86,9 +136,17 @@ fi
 
 docker run --rm -it \
     $RUNTIME_FLAG \
+    --cap-drop=ALL \
+    --cap-add=CHOWN \
+    --cap-add=SETUID \
+    --cap-add=SETGID \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
     --security-opt=no-new-privileges \
+    --security-opt seccomp="$SCRIPT_DIR/seccomp-profile.json" \
+    --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+    --tmpfs /home/claude/.config:rw,nosuid,size=64m \
     -e CLAUDE_CREDENTIALS="$CREDS" \
     $FORCE_CREDS_FLAG \
     -v "$PROJECT_DIR":/workspace \

@@ -1,13 +1,12 @@
 # Claude Code Docker Sandbox
 
-Run Claude Code CLI in a sandboxed Docker container with gVisor isolation. Use your Claude Max subscription credentials extracted from macOS keychain — no API key required.
+Run Claude Code CLI in a hardened Docker container with defense-in-depth isolation. Use your Claude Max subscription credentials extracted from macOS keychain — no API key required.
 
 ## Prerequisites
 
 - macOS with Docker runtime:
-  - **OrbStack** (recommended) — best compatibility with bind-mounts
+  - **OrbStack** (recommended) — best compatibility with bind-mounts, VM-level isolation
   - **Docker Desktop** — works with `--isolate-claude-data` flag
-- gVisor runtime configured (optional, for additional syscall isolation)
 - Claude Code installed on host (`curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials stored in keychain)
 
@@ -31,20 +30,17 @@ The first run builds the Docker image. Subsequent runs reuse the cached image.
 
 ## Security Model
 
-The sandbox provides filesystem isolation and syscall interception while allowing network access.
+The sandbox provides defense-in-depth isolation through multiple orthogonal hardening layers.
 
 | Layer | Protection |
 |-------|-----------|
-| **Filesystem** | Only the specified project directory is mounted. Claude cannot see `~`, `.ssh`, `.env`, or other projects. |
-| **gVisor** | Syscall interception via user-space kernel. All system calls go through gVisor, not the host kernel. |
+| **Filesystem** | Read-only rootfs. Only `/workspace` and `~/.claude` are writable. `/tmp` is a noexec tmpfs. |
+| **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, and other high-risk syscalls. |
+| **Capabilities** | All dropped except CHOWN/SETUID/SETGID (entrypoint setup + gosu) and NET_ADMIN/NET_RAW (firewall). |
+| **Network** | iptables allowlist: only Anthropic API, GitHub, npm, and a few other required services. All other outbound traffic blocked. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `gosu`. No `sudo` in image. `no-new-privileges` prevents escalation. |
 | **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). |
-
-### Network (NOT sandboxed)
-
-The container has full outbound internet access. Claude Code can reach any host, not just Anthropic's API.
-
-The included iptables firewall script does not work with gVisor's virtualized network stack. For defense-in-depth, use host-level tools like [Little Snitch](https://www.obdev.at/products/littlesnitch/) or [LuLu](https://objective-see.org/products/lulu.html) to restrict Docker's outbound connections.
+| **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
 
 ## Usage
 
@@ -63,7 +59,7 @@ Only the specified directory is mounted at `/workspace`. Claude cannot see other
 - `--rebuild` — Rebuild image with `--no-cache` (runs lint first)
 - `--fresh-creds` — Overwrite credentials with current keychain values
 - `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
-- `--no-gvisor` — Disable gVisor runtime even if available (firewall works without gVisor)
+- `--no-gvisor` — Disable gVisor runtime even if available (all other hardening layers remain active)
 
 ### Shell alias
 
@@ -80,33 +76,37 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild`
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│ macOS Host                                      │
-│                                                 │
-│  run-claude.sh:                                 │
-│   1. Extract OAuth creds from macOS keychain    │
-│   2. Pass as env var CLAUDE_CREDENTIALS         │
-│   3. Launch container                           │
-│                                                 │
-│  ┌───────────────────────────────────────────┐  │
-│  │ Docker Container (gVisor runtime)         │  │
-│  │                                           │  │
-│  │  Starts as root → gosu drops to claude    │  │
-│  │  Claude Code CLI (native binary)          │  │
-│  │                                           │  │
-│  │  Mounts:                                  │  │
-│  │   /workspace ← project dir (rw)           │  │
-│  │   ~/.claude ← host ~/.claude (bind-mount) │  │
-│  │              or claude-data volume        │  │
-│  │              (with --isolate-claude-data) │  │
-│  │                                           │  │
-│  │  Credential flow:                         │  │
-│  │   env CLAUDE_CREDENTIALS                  │  │
-│  │     → entrypoint writes to                │  │
-│  │       ~/.claude/.credentials.json         │  │
-│  │     → env var unset before exec           │  │
-│  └───────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ macOS Host                                           │
+│                                                      │
+│  run-claude.sh:                                      │
+│   1. Extract OAuth creds from macOS keychain         │
+│   2. Pass as env var CLAUDE_CREDENTIALS              │
+│   3. Launch container with hardened flags             │
+│                                                      │
+│  ┌────────────────────────────────────────────────┐  │
+│  │ OrbStack VM (Linux kernel boundary)            │  │
+│  │  ┌──────────────────────────────────────────┐  │  │
+│  │  │ Docker Container                         │  │  │
+│  │  │  Read-only rootfs + seccomp + no caps    │  │  │
+│  │  │  iptables allowlist (Anthropic/GitHub/…) │  │  │
+│  │  │                                          │  │  │
+│  │  │  Starts as root → gosu drops to claude   │  │  │
+│  │  │  Claude Code CLI (native binary)         │  │  │
+│  │  │                                          │  │  │
+│  │  │  Mounts:                                 │  │  │
+│  │  │   /workspace ← project dir (rw)          │  │  │
+│  │  │   ~/.claude ← host ~/.claude or volume   │  │  │
+│  │  │   /tmp ← tmpfs (noexec, 512m)           │  │  │
+│  │  │                                          │  │  │
+│  │  │  Credential flow:                        │  │  │
+│  │  │   env CLAUDE_CREDENTIALS                 │  │  │
+│  │  │     → entrypoint writes to               │  │  │
+│  │  │       ~/.claude/.credentials.json        │  │  │
+│  │  │     → env var unset before exec          │  │  │
+│  │  └──────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
 ```
 
 ### Credential flow
@@ -159,7 +159,7 @@ If auto-refresh fails or you see auth errors mid-session:
 
 ### "Firewall not initialized" warning
 
-Expected with gVisor runtime. The container works normally. See Security Model above.
+The iptables firewall requires NET_ADMIN capability. If you see this warning, check that `--cap-add=NET_ADMIN` is present in the docker run command. With gVisor runtime, the firewall does not work due to gVisor's virtualized network stack — this is expected.
 
 ### Permission denied on project files
 
@@ -216,7 +216,7 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 
 | Approach | Auth | Sandboxing | macOS Keychain |
 |----------|------|-----------|----------------|
-| **This setup** | Claude Max OAuth | gVisor + filesystem isolation | Yes |
+| **This setup** | Claude Max OAuth | Read-only rootfs, seccomp, capabilities drop, iptables firewall, VM isolation | Yes |
 | [addt (dclaude)](https://github.com/anthropics/claude-code/tree/main/packages/addt) | API key only | Docker + firewall | No |
 | [Anthropic devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) | Manual login | Docker + iptables | No |
 | [claude-code-docker](https://github.com/decisional/claude-code-docker) | Keychain extraction | Docker only | Yes |
@@ -225,8 +225,9 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 ## File Reference
 
 - **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, `gosu` for privilege drop
-- **entrypoint.sh** — Firewall attempt, credential setup, gitconfig copy, privilege drop
-- **run-claude.sh** — Host launcher: keychain extraction, image build, container launch
-- **init-firewall.sh** — Anthropic's iptables allowlist (inactive with gVisor)
+- **entrypoint.sh** — Firewall init, credential setup, gitconfig (on volume), privilege drop
+- **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch
+- **init-firewall.sh** — iptables allowlist for outbound network filtering
+- **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus high-risk syscalls)
 - **lint.sh** — Runs Hadolint on Dockerfile via Docker
 - **.githooks/pre-commit** — Runs lint on commit; enable with `git config core.hooksPath .githooks`

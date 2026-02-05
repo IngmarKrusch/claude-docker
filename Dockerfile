@@ -14,7 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN (groupadd -g ${GROUP_ID} claude 2>/dev/null || true) \
     && useradd -m -l -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash claude
 
-# Install Claude Code (native binary, no Node.js needed)
+# Node.js (needed by MCP servers that use npx)
+# hadolint ignore=DL3008,DL4006
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code (native binary)
 ENV DISABLE_AUTOUPDATER=1
 # hadolint ignore=DL4006
 RUN curl -fsSL https://claude.ai/install.sh | bash \
