@@ -78,6 +78,9 @@ if [ -f /tmp/host-gitconfig ]; then
     cp /tmp/host-gitconfig "$GITCONFIG"
     chown claude: "$GITCONFIG"
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git config --global --add safe.directory /workspace
+    # Strip host credential helpers (e.g. macOS GCM) that don't exist in the container
+    HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
+        git config --global --unset-all credential.helper 2>/dev/null || true
     log "[sandbox] Git configured"
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
