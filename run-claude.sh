@@ -34,7 +34,7 @@ Security layers:
   dropped (except CHOWN/SETUID/SETGID/SETPCAP/NET_ADMIN/NET_RAW — bounding set
   cleared after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
   no-new-privileges, resource limits (memory/pids), no setuid binaries, privileged
-  port binding blocked, kernel info leaks masked (kallsyms/kheaders/btf), git hooks
+  port binding blocked, git hooks
   enforced off via env vars (immune to local config override), GitHub token scoped
   to workspace repo only, and privilege drop to UID 501 via setpriv.
 
@@ -245,8 +245,5 @@ docker run --rm -it \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     -v "$CLAUDE_DATA_MOUNT" \
-    -v /dev/null:/proc/kallsyms:ro \
-    -v /dev/null:/sys/kernel/kheaders.tar.xz:ro \
-    -v /dev/null:/sys/kernel/btf/vmlinux:ro \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
