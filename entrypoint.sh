@@ -95,6 +95,15 @@ if [ -f /tmp/host-gitconfig ]; then
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
 
+# Enforce core.hooksPath=/dev/null via environment variables.
+# GIT_CONFIG_COUNT env vars have the highest priority in git's config cascade
+# and CANNOT be overridden by local, worktree, or command-line config.
+# This prevents a prompt-injection attack from re-enabling hooks via
+# `git config --local core.hooksPath /workspace/.git/hooks`.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=core.hooksPath
+export GIT_CONFIG_VALUE_0=/dev/null
+
 # Configure GitHub credentials for git push (in-memory only, never written to disk)
 if [ -n "$GITHUB_TOKEN" ]; then
     CACHE_SOCK="/tmp/.git-credential-cache/sock"
@@ -106,6 +115,20 @@ if [ -n "$GITHUB_TOKEN" ]; then
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
         git config --global credential.helper "cache --timeout=86400 --socket=$CACHE_SOCK"
 
+    # Scope the token to the workspace repo only.
+    # With useHttpPath=true, git includes the repo path in credential lookups,
+    # so a token stored for "github.com/owner/repo.git" won't be returned for
+    # requests to other repos. This limits blast radius if the session is compromised.
+    HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
+        git config --global "credential.https://github.com.useHttpPath" true
+
+    # Detect workspace repo path (e.g. "owner/repo") from git remote
+    _REPO_PATH=""
+    _REMOTE_URL=$(git -C /workspace remote get-url origin 2>/dev/null || true)
+    if [[ "$_REMOTE_URL" =~ github\.com[:/](.+)$ ]]; then
+        _REPO_PATH="${BASH_REMATCH[1]%.git}"
+    fi
+
     # Scrub GITHUB_TOKEN from env BEFORE spawning the credential cache daemon.
     # git-credential-cache--daemon inherits the caller's environment and persists
     # for the container lifetime — leaving the token in /proc/<pid>/environ.
@@ -114,13 +137,23 @@ if [ -n "$GITHUB_TOKEN" ]; then
     unset GITHUB_TOKEN
 
     # Feed token into cache daemon (run as claude so the socket is owned by claude)
-    printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n' "$_GH_TOKEN" | \
-        gosu claude env -u GITHUB_TOKEN HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git credential approve
+    if [ -n "$_REPO_PATH" ]; then
+        # Store credential WITH repo path — only serves token for this specific repo
+        printf 'protocol=https\nhost=github.com\npath=%s.git\nusername=x-access-token\npassword=%s\n\n' \
+            "$_REPO_PATH" "$_GH_TOKEN" | \
+            gosu claude env -u GITHUB_TOKEN HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git credential approve
+        log "[sandbox] GitHub credentials configured (scoped to $_REPO_PATH)"
+    else
+        # Fallback: no GitHub remote detected, store without path restriction
+        printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n' "$_GH_TOKEN" | \
+            gosu claude env -u GITHUB_TOKEN HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git credential approve
+        log "[sandbox] GitHub credentials configured (unscoped — no GitHub remote found)"
+    fi
 
-    # Scrub local variable
+    # Scrub local variables
     _GH_TOKEN="$(head -c ${#_GH_TOKEN} /dev/urandom | base64)"
     unset _GH_TOKEN
-    log "[sandbox] GitHub credentials configured (in-memory cache)"
+    unset _REMOTE_URL _REPO_PATH
 fi
 
 # Fix ownership on tmpfs mounts (Docker creates them as root)

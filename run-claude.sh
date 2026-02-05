@@ -33,8 +33,10 @@ Security layers:
   Read-only rootfs, custom seccomp allowlist (ptrace blocked), all capabilities
   dropped (except CHOWN/SETUID/SETGID/SETPCAP/NET_ADMIN/NET_RAW — bounding set
   cleared after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
-  no-new-privileges, resource limits (memory/pids), no setuid binaries, and
-  privilege drop to UID 501 via gosu.
+  no-new-privileges, resource limits (memory/pids), no setuid binaries, privileged
+  port binding blocked, kernel info leaks masked (kallsyms/kheaders/btf), git hooks
+  enforced off via env vars (immune to local config override), GitHub token scoped
+  to workspace repo only, and privilege drop to UID 501 via setpriv.
 
 Runtime compatibility:
   OrbStack (recommended):
@@ -216,6 +218,7 @@ docker run --rm -it \
     --cap-add=NET_RAW \
     --security-opt=no-new-privileges \
     --security-opt seccomp="$SCRIPT_DIR/seccomp-profile.json" \
+    --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
     --pids-limit=4096 \
     --memory=8g \
     --memory-swap=8g \
@@ -230,5 +233,8 @@ docker run --rm -it \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     -v "$CLAUDE_DATA_MOUNT" \
+    -v /dev/null:/proc/kallsyms:ro \
+    -v /dev/null:/sys/kernel/kheaders.tar.xz:ro \
+    -v /dev/null:/sys/kernel/btf/vmlinux:ro \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
