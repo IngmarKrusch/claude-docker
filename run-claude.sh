@@ -158,7 +158,7 @@ if [ "$REBUILD" = true ]; then
 
     # Check if rebuild is actually needed
     LATEST_VERSION=$(curl -fsSL "$LATEST_URL" 2>/dev/null || echo "unknown")
-    INSTALLED_VERSION=$(docker run --rm "$IMAGE_NAME" claude --version 2>/dev/null | awk '{print $1}' || echo "none")
+    INSTALLED_VERSION=$(docker run --rm --entrypoint claude "$IMAGE_NAME" --version 2>/dev/null | awk '{print $1}' || echo "none")
 
     if [ "$LATEST_VERSION" != "unknown" ] && [ "$LATEST_VERSION" = "$INSTALLED_VERSION" ]; then
         echo "Claude Code $INSTALLED_VERSION is already up-to-date, skipping rebuild."
