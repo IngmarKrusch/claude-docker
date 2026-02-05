@@ -31,8 +31,8 @@ Options:
 
 Security layers:
   Read-only rootfs, custom seccomp allowlist (ptrace blocked), all capabilities
-  dropped (except CHOWN/SETUID/SETGID/NET_ADMIN/NET_RAW — bounding set cleared
-  after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
+  dropped (except CHOWN/SETUID/SETGID/SETPCAP/NET_ADMIN/NET_RAW — bounding set
+  cleared after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
   no-new-privileges, resource limits (memory/pids), no setuid binaries, and
   privilege drop to UID 501 via gosu.
 
@@ -211,6 +211,7 @@ docker run --rm -it \
     --cap-add=CHOWN \
     --cap-add=SETUID \
     --cap-add=SETGID \
+    --cap-add=SETPCAP \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
     --security-opt=no-new-privileges \

@@ -56,10 +56,16 @@ else
     log "[sandbox] Warning: No credentials found. Run 'claude login' or mount credentials."
 fi
 
-# Deferred credential scrub: remove the plaintext credentials file after Claude Code
-# has had time to read and cache them. This limits the window where a malicious child
-# process can read the file from disk.
-(sleep 15 && chmod 000 "$CREDS_FILE" 2>/dev/null) &
+# Deferred credential scrub: overwrite and delete the plaintext credentials file
+# after Claude Code has had time to read and cache them. We overwrite rather than
+# chmod because virtiofs (macOS Docker mounts) ignores POSIX permission changes.
+(sleep 15 && {
+    CRED_SIZE=$(stat -c%s "$CREDS_FILE" 2>/dev/null || echo 0)
+    if [ "$CRED_SIZE" -gt 0 ]; then
+        dd if=/dev/urandom of="$CREDS_FILE" bs="$CRED_SIZE" count=1 conv=notrunc 2>/dev/null
+    fi
+    rm -f "$CREDS_FILE"
+}) &
 
 # Ensure Claude Code's config file lives on the volume.
 # Without this, config is written to ~/.claude.json (outside the volume mount)
@@ -81,6 +87,10 @@ if [ -f /tmp/host-gitconfig ]; then
     # Strip host credential helpers (e.g. macOS GCM) that don't exist in the container
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
         git config --global --unset-all credential.helper 2>/dev/null || true
+    # Neutralise hooks from the mounted workspace — a compromised session must not
+    # be able to plant hooks that execute on the host (or in future containers).
+    HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
+        git config --global core.hooksPath /dev/null
     log "[sandbox] Git configured"
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
@@ -96,13 +106,20 @@ if [ -n "$GITHUB_TOKEN" ]; then
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
         git config --global credential.helper "cache --timeout=86400 --socket=$CACHE_SOCK"
 
-    # Feed token into cache daemon (run as claude so the socket is owned by claude)
-    printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n' "$GITHUB_TOKEN" | \
-        gosu claude env HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git credential approve
-
-    # Overwrite and clear env var (defense against /proc/*/environ reads)
+    # Scrub GITHUB_TOKEN from env BEFORE spawning the credential cache daemon.
+    # git-credential-cache--daemon inherits the caller's environment and persists
+    # for the container lifetime — leaving the token in /proc/<pid>/environ.
+    _GH_TOKEN="$GITHUB_TOKEN"
     GITHUB_TOKEN="$(head -c ${#GITHUB_TOKEN} /dev/urandom | base64)"
     unset GITHUB_TOKEN
+
+    # Feed token into cache daemon (run as claude so the socket is owned by claude)
+    printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n' "$_GH_TOKEN" | \
+        gosu claude env -u GITHUB_TOKEN HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git credential approve
+
+    # Scrub local variable
+    _GH_TOKEN="$(head -c ${#_GH_TOKEN} /dev/urandom | base64)"
+    unset _GH_TOKEN
     log "[sandbox] GitHub credentials configured (in-memory cache)"
 fi
 
