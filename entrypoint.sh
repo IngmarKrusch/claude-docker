@@ -89,8 +89,8 @@ export GIT_CONFIG_GLOBAL="$GITCONFIG"
 if [ -n "$GITHUB_TOKEN" ]; then
     CACHE_SOCK="/tmp/.git-credential-cache/sock"
     mkdir -p "$(dirname "$CACHE_SOCK")"
-    chown claude: "$(dirname "$CACHE_SOCK")"
     chmod 700 "$(dirname "$CACHE_SOCK")"
+    chown claude: "$(dirname "$CACHE_SOCK")"
 
     # Configure git to use the in-memory credential cache
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
