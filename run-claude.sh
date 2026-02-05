@@ -21,9 +21,10 @@ Options:
   --isolate-claude-data   Use a named Docker volume ('claude-data') instead of
                           bind-mounting the host's ~/.claude/ directory.
                           Required for Docker Desktop (see below).
-  --no-gvisor             Skip gVisor runtime even if available. All other
-                          hardening layers (seccomp, read-only rootfs,
-                          capabilities drop, firewall) remain active.
+  --with-gvisor           Use gVisor (runsc) runtime if available. By default
+                          the standard runc runtime is used, which is best for
+                          OrbStack. Note: the iptables firewall does not work
+                          with gVisor's virtualized network stack.
 
 Security layers:
   Read-only rootfs, custom seccomp allowlist, all capabilities dropped
@@ -55,7 +56,7 @@ EOF
 REBUILD=false
 FRESH_CREDS=false
 ISOLATE_DATA=false
-NO_GVISOR=false
+WITH_GVISOR=false
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -63,7 +64,7 @@ for arg in "$@"; do
         --rebuild) REBUILD=true ;;
         --fresh-creds) FRESH_CREDS=true ;;
         --isolate-claude-data) ISOLATE_DATA=true ;;
-        --no-gvisor) NO_GVISOR=true ;;
+        --with-gvisor) WITH_GVISOR=true ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -100,15 +101,15 @@ elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
         "$SCRIPT_DIR"
 fi
 
-# Detect runtime: prefer gVisor (runsc) if available
+# Detect runtime: use runc by default, gVisor only with --with-gvisor
 RUNTIME_FLAG=""
-if [ "$NO_GVISOR" = true ]; then
-    echo "[sandbox] gVisor disabled via --no-gvisor"
-elif docker info 2>/dev/null | grep -q runsc; then
-    RUNTIME_FLAG="--runtime=runsc"
-    echo "[sandbox] Using gVisor runtime"
-else
-    echo "[sandbox] gVisor not available, using default runtime"
+if [ "$WITH_GVISOR" = true ]; then
+    if docker info 2>/dev/null | grep -q runsc; then
+        RUNTIME_FLAG="--runtime=runsc"
+        echo "[sandbox] Using gVisor runtime (note: firewall inactive with gVisor)"
+    else
+        echo "[sandbox] Warning: --with-gvisor requested but runsc not available, using runc"
+    fi
 fi
 
 # Run container with credentials passed via environment variable.

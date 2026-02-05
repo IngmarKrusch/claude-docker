@@ -59,7 +59,7 @@ Only the specified directory is mounted at `/workspace`. Claude cannot see other
 - `--rebuild` — Rebuild image with `--no-cache` (runs lint first)
 - `--fresh-creds` — Overwrite credentials with current keychain values
 - `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
-- `--no-gvisor` — Disable gVisor runtime even if available (all other hardening layers remain active)
+- `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
 
 ### Shell alias
 
