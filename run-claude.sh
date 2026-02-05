@@ -149,17 +149,28 @@ if [ -n "$GH_TOKEN" ]; then
     echo "[sandbox] GitHub token found"
 fi
 
+LATEST_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest"
+
 # Build image if needed (or forced with --rebuild)
 if [ "$REBUILD" = true ]; then
     echo "Linting Dockerfile..."
     "$SCRIPT_DIR/lint.sh"
-    echo "Rebuilding sandbox image..."
-    docker build \
-        --build-arg USER_ID=$(id -u) \
-        --build-arg GROUP_ID=$(id -g) \
-        --build-arg CACHE_BUST=$(date +%s) \
-        -t "$IMAGE_NAME" \
-        "$SCRIPT_DIR"
+
+    # Check if rebuild is actually needed
+    LATEST_VERSION=$(curl -fsSL "$LATEST_URL" 2>/dev/null || echo "unknown")
+    INSTALLED_VERSION=$(docker run --rm "$IMAGE_NAME" claude --version 2>/dev/null | awk '{print $1}' || echo "none")
+
+    if [ "$LATEST_VERSION" != "unknown" ] && [ "$LATEST_VERSION" = "$INSTALLED_VERSION" ]; then
+        echo "Claude Code $INSTALLED_VERSION is already up-to-date, skipping rebuild."
+    else
+        echo "Rebuilding sandbox image (installed: ${INSTALLED_VERSION}, latest: ${LATEST_VERSION})..."
+        docker build \
+            --build-arg USER_ID=$(id -u) \
+            --build-arg GROUP_ID=$(id -g) \
+            --build-arg CACHE_BUST=$(date +%s) \
+            -t "$IMAGE_NAME" \
+            "$SCRIPT_DIR"
+    fi
 elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo "Building sandbox image..."
     docker build \
