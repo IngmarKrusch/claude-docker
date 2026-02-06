@@ -99,6 +99,13 @@ export GIT_CONFIG_GLOBAL="$GITCONFIG"
 # at /usr/local/bin/git, which force-sets GIT_CONFIG_COUNT on every invocation.
 # The global gitconfig settings above serve as defense-in-depth only.
 
+# Enable LD_PRELOAD for nodump.so BEFORE spawning the credential cache daemon.
+# nodump.so calls prctl(PR_SET_DUMPABLE, 0) in a constructor, making every
+# dynamically-linked process non-dumpable (/proc/<pid>/mem inaccessible to
+# same-UID processes). This protects the credential daemon, claude, and all
+# child processes from /proc memory reading/writing attacks.
+export LD_PRELOAD=/usr/local/lib/nodump.so
+
 # Configure GitHub credentials for git push (in-memory only, never written to disk)
 if [ -n "$GITHUB_TOKEN" ]; then
     CACHE_SOCK="/tmp/.git-credential-cache/sock"
@@ -171,9 +178,15 @@ ulimit -c 0
 # both: uid/gid change uses current effective caps, then the empty bounding
 # set takes effect when exec'ing the final command.
 #
-# drop-dumpable calls prctl(PR_SET_DUMPABLE, 0) before exec'ing the real
-# command. This prevents child processes (same UID) from reading/writing
-# /proc/<pid>/mem of the claude process, even without CAP_SYS_PTRACE.
+# /proc/<pid>/mem protection is provided by two layers:
+#   1. LD_PRELOAD=nodump.so (primary) — constructor calls prctl(PR_SET_DUMPABLE, 0)
+#      AFTER exec, inside the new process. This is the only reliable method because
+#      the kernel resets dumpable=1 on exec of readable binaries (would_dump).
+#   2. drop-dumpable (defense-in-depth) — sets dumpable=0 BEFORE exec. Ineffective
+#      alone (kernel resets it), but provides a fallback for statically-linked binaries
+#      that don't load LD_PRELOAD.
+#   3. chmod 711 on sensitive binaries (belt-and-suspenders) — non-readable binaries
+#      cause would_dump() to set dumpable=0 on exec, independent of LD_PRELOAD.
 exec setpriv \
     --reuid="$(id -u claude)" \
     --regid="$(id -g claude)" \

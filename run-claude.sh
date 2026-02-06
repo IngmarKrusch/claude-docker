@@ -241,7 +241,7 @@ docker run --rm -it \
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,size=512m \
     --tmpfs /home/claude/.config:rw,nosuid,size=64m \
-    --tmpfs /home/claude/.npm:rw,exec,nosuid,size=256m \
+    --tmpfs /home/claude/.npm:rw,noexec,nosuid,size=256m \
     -e CLAUDE_CREDENTIALS="$CREDS" \
     $FORCE_CREDS_FLAG \
     $GH_TOKEN_FLAG \
