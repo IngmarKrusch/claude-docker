@@ -32,9 +32,16 @@ if [ -z "$DNS_RESOLVER" ]; then
 fi
 echo "DNS resolver detected as: $DNS_RESOLVER"
 
-# Allow outbound DNS only to the detected resolver (prevents DNS tunneling to arbitrary servers)
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
+# Rate-limit and size-limit DNS to mitigate DNS tunneling exfiltration.
+# DNS is pinned to the internal resolver (no direct external DNS), but the
+# resolver forwards all queries — enabling data exfiltration via subdomain
+# encoding (~50 bytes/query). These rules reduce tunneling throughput:
+# - Drop oversized UDP DNS packets (>512 bytes, RFC 1035 standard limit)
+# - Rate-limit to 10/sec sustained, burst 20 (sufficient for npm/git/curl)
+# - At 10 queries/sec × ~50 bytes payload, tunneling drops to ~500 B/s
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m length --length 513:65535 -j DROP
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
 # Block DNS to ALL other destinations (must come before general allowlist rules)
 iptables -A OUTPUT -p udp --dport 53 -j DROP
 iptables -A OUTPUT -p tcp --dport 53 -j DROP
