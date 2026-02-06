@@ -1,5 +1,5 @@
 {
-  "comment": "Custom seccomp profile for Claude Code sandbox. Based on Docker's default profile with additional restrictions: io_uring (already blocked by default), userfaultfd (already blocked by default), personality, process_vm_readv/writev, perf_event_open, and ptrace removed.",
+  "comment": "Custom seccomp profile for Claude Code sandbox. Based on Docker's default profile with additional restrictions: io_uring (already blocked by default), userfaultfd (already blocked by default), personality, process_vm_readv/writev, perf_event_open, ptrace, memfd_create, and memfd_secret removed.",
   "defaultAction": "SCMP_ACT_ERRNO",
   "defaultErrnoRet": 1,
   "archMap": [
@@ -43,7 +43,7 @@
         "lchown", "lchown32", "lgetxattr", "link", "linkat", "listen", "listmount",
         "listxattr", "listxattrat", "llistxattr", "_llseek", "lremovexattr", "lseek",
         "lsetxattr", "lstat", "lstat64", "madvise", "map_shadow_stack", "membarrier",
-        "memfd_create", "memfd_secret", "mincore", "mkdir", "mkdirat", "mknod",
+        "mincore", "mkdir", "mkdirat", "mknod",
         "mknodat", "mlock", "mlock2", "mlockall", "mmap", "mmap2", "mprotect",
         "mq_getsetattr", "mq_notify", "mq_open", "mq_timedreceive",
         "mq_timedreceive_time64", "mq_timedsend", "mq_timedsend_time64", "mq_unlink",

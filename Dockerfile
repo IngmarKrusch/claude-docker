@@ -37,6 +37,18 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 RUN find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true; \
     find / -perm -2000 -type f -exec chmod g-s {} + 2>/dev/null || true
 
+# Git wrapper: force hooksPath=/dev/null and credential.helper on every invocation.
+# Sits at /usr/local/bin/git (before /usr/bin/git in PATH) and cannot be modified
+# because rootfs is read-only. Prevents bypass of GIT_CONFIG_COUNT by overriding it.
+RUN printf '#!/bin/sh\n\
+export GIT_CONFIG_COUNT=2\n\
+export GIT_CONFIG_KEY_0=core.hooksPath\n\
+export GIT_CONFIG_VALUE_0=/dev/null\n\
+export GIT_CONFIG_KEY_1=credential.helper\n\
+export GIT_CONFIG_VALUE_1="cache --timeout=86400 --socket=/tmp/.git-credential-cache/sock"\n\
+exec /usr/bin/git "$@"\n' > /usr/local/bin/git \
+    && chmod +x /usr/local/bin/git
+
 # Firewall scripts
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY reload-firewall.sh /usr/local/bin/reload-firewall.sh

@@ -59,7 +59,7 @@ fi
 # Deferred credential scrub: overwrite and delete the plaintext credentials file
 # after Claude Code has had time to read and cache them. We overwrite rather than
 # chmod because virtiofs (macOS Docker mounts) ignores POSIX permission changes.
-(sleep 15 && {
+(sleep 3 && {
     CRED_SIZE=$(stat -c%s "$CREDS_FILE" 2>/dev/null || echo 0)
     if [ "$CRED_SIZE" -gt 0 ]; then
         dd if=/dev/urandom of="$CREDS_FILE" bs="$CRED_SIZE" count=1 conv=notrunc 2>/dev/null
@@ -95,14 +95,9 @@ if [ -f /tmp/host-gitconfig ]; then
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
 
-# Enforce core.hooksPath=/dev/null via environment variables.
-# GIT_CONFIG_COUNT env vars have the highest priority in git's config cascade
-# and CANNOT be overridden by local, worktree, or command-line config.
-# This prevents a prompt-injection attack from re-enabling hooks via
-# `git config --local core.hooksPath /workspace/.git/hooks`.
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0=core.hooksPath
-export GIT_CONFIG_VALUE_0=/dev/null
+# Note: core.hooksPath and credential.helper are enforced by the git wrapper
+# at /usr/local/bin/git, which force-sets GIT_CONFIG_COUNT on every invocation.
+# The global gitconfig settings above serve as defense-in-depth only.
 
 # Configure GitHub credentials for git push (in-memory only, never written to disk)
 if [ -n "$GITHUB_TOKEN" ]; then

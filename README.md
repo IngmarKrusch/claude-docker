@@ -36,12 +36,19 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 | Layer | Protection |
 |-------|-----------|
 | **Filesystem** | Read-only rootfs. Only `/workspace` and `~/.claude` are writable. `/tmp` is a noexec tmpfs. |
-| **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, and other high-risk syscalls. |
+| **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret, and other high-risk syscalls. |
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID (entrypoint setup + gosu) and NET_ADMIN/NET_RAW (firewall). |
 | **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `gosu`. No `sudo` in image. `no-new-privileges` prevents escalation. |
 | **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
+
+### Known trade-offs
+
+Some attack surfaces are intentionally left open because closing them would break core functionality:
+
+- **`~/.npm` tmpfs requires `exec`** — npx downloads and runs binaries from `~/.npm/_npx/` (e.g. MCP servers). Using `noexec` on this mount (commit `60ca5b1`) broke MCP servers; commit `666c2bc` restored `exec`. The firewall allowlist limits what can be downloaded and executed.
+- **npm postinstall scripts** — `npm install` runs arbitrary postinstall scripts. Blocking via `--ignore-scripts` would break MCP servers that rely on npx. Mitigated by the firewall allowlist restricting network access.
 
 ## Firewall Configuration
 
