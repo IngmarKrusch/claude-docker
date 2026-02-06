@@ -34,8 +34,11 @@ Security layers:
   dropped (except CHOWN/SETUID/SETGID/SETPCAP/NET_ADMIN/NET_RAW — bounding set
   cleared after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
   no-new-privileges, resource limits (memory/pids), no setuid binaries, privileged
-  port binding blocked, git hooks
-  enforced off via env vars (immune to local config override), GitHub token scoped
+  port binding blocked, --init (tini as PID 1, root-owned /proc/1/mem),
+  drop-dumpable wrapper (PR_SET_DUMPABLE=0 prevents /proc/<pid>/mem access),
+  core dumps disabled (ulimit -c 0), git wrapper at all entry points
+  (/usr/bin/git, /usr/lib/git-core/git) enforcing hooksPath=/dev/null and
+  credential.helper (immune to local config override), GitHub token scoped
   to workspace repo only, and privilege drop to UID 501 via setpriv.
 
 Runtime compatibility:
@@ -220,6 +223,7 @@ else
 fi
 
 docker run --rm -it \
+    --init \
     $RUNTIME_FLAG \
     --cap-drop=ALL \
     --cap-add=CHOWN \

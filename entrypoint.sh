@@ -162,15 +162,22 @@ export HOME=/home/claude
 export SHELL=/bin/bash
 export PATH="/home/claude/.local/bin:$PATH"
 
+# Disable core dumps to prevent secrets leaking via crash dumps to /workspace
+ulimit -c 0
+
 # Drop privileges and clear the bounding set in a single setpriv call.
 # We can't exec gosu after clearing the bounding set because gosu needs
 # CAP_SETUID/SETGID which are lost at the execve boundary. setpriv handles
 # both: uid/gid change uses current effective caps, then the empty bounding
 # set takes effect when exec'ing the final command.
+#
+# drop-dumpable calls prctl(PR_SET_DUMPABLE, 0) before exec'ing the real
+# command. This prevents child processes (same UID) from reading/writing
+# /proc/<pid>/mem of the claude process, even without CAP_SYS_PTRACE.
 exec setpriv \
     --reuid="$(id -u claude)" \
     --regid="$(id -g claude)" \
     --init-groups \
     --inh-caps=-all \
     --bounding-set=-all \
-    -- "$@"
+    -- /usr/local/bin/drop-dumpable "$@"

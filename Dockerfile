@@ -7,7 +7,7 @@ ARG GROUP_ID=20
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl gosu zsh fzf ripgrep jq aggregate ca-certificates \
-    iptables ipset dnsutils iproute2 libcap2-bin \
+    iptables ipset dnsutils iproute2 libcap2-bin gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user matching host UID/GID
@@ -37,17 +37,28 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 RUN find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true; \
     find / -perm -2000 -type f -exec chmod g-s {} + 2>/dev/null || true
 
-# Git wrapper: force hooksPath=/dev/null and credential.helper on every invocation.
-# Sits at /usr/local/bin/git (before /usr/bin/git in PATH) and cannot be modified
-# because rootfs is read-only. Prevents bypass of GIT_CONFIG_COUNT by overriding it.
+# Compile drop-dumpable wrapper (sets PR_SET_DUMPABLE=0 before exec)
+COPY drop-dumpable.c /tmp/drop-dumpable.c
+RUN gcc -static -O2 -o /usr/local/bin/drop-dumpable /tmp/drop-dumpable.c \
+    && rm /tmp/drop-dumpable.c \
+    && chmod +x /usr/local/bin/drop-dumpable
+
+# Git wrapper: replace ALL git entry points so /usr/bin/git can't bypass the wrapper.
+# Force hooksPath=/dev/null and credential.helper on every invocation.
+# Real binary moved to /usr/libexec/git-core-wrapped. Rootfs is read-only so
+# wrapper can't be modified at runtime.
 RUN printf '#!/bin/sh\n\
 export GIT_CONFIG_COUNT=2\n\
 export GIT_CONFIG_KEY_0=core.hooksPath\n\
 export GIT_CONFIG_VALUE_0=/dev/null\n\
 export GIT_CONFIG_KEY_1=credential.helper\n\
 export GIT_CONFIG_VALUE_1="cache --timeout=86400 --socket=/tmp/.git-credential-cache/sock"\n\
-exec /usr/bin/git "$@"\n' > /usr/local/bin/git \
-    && chmod +x /usr/local/bin/git
+exec /usr/libexec/git-core-wrapped "$@"\n' > /usr/local/bin/git \
+    && chmod +x /usr/local/bin/git \
+    && mkdir -p /usr/libexec \
+    && mv /usr/bin/git /usr/libexec/git-core-wrapped \
+    && cp /usr/local/bin/git /usr/bin/git \
+    && cp /usr/local/bin/git /usr/lib/git-core/git
 
 # Firewall scripts
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
