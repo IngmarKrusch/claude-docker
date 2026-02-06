@@ -230,7 +230,6 @@ docker run --rm -it \
     --cap-add=NET_RAW \
     --security-opt=no-new-privileges \
     --security-opt seccomp="$SCRIPT_DIR/seccomp-profile.json" \
-    --security-opt mask=/proc/1/mem \
     --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
     --pids-limit=4096 \
     --memory=8g \
