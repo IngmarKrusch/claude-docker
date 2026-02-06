@@ -12,9 +12,11 @@ directory is used. Any additional arguments are passed through to Claude Code.
 
 Options:
   -h, --help              Show this help message and exit
-  --rebuild               Rebuild the Docker image from scratch (runs lint
-                          first, uses --no-cache). Use after editing the
-                          Dockerfile or to pull a new Claude Code version.
+  --rebuild               Rebuild the Docker image (runs lint, checks the
+                          latest Claude Code version, skips if already
+                          up-to-date, uses targeted cache-bust via CACHE_BUST
+                          build-arg). Use after editing the Dockerfile or to
+                          pull a new Claude Code version.
   --fresh-creds           Force re-inject credentials from the macOS keychain,
                           even if unexpired credentials exist in the container.
                           Useful after running 'claude login' on the host.

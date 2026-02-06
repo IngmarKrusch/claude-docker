@@ -37,9 +37,9 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 |-------|-----------|
 | **Filesystem** | Read-only rootfs. Only `/workspace` and `~/.claude` are writable. `/tmp` is a noexec tmpfs. |
 | **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret, and other high-risk syscalls. |
-| **Capabilities** | All dropped except CHOWN/SETUID/SETGID (entrypoint setup + gosu) and NET_ADMIN/NET_RAW (firewall). |
+| **Capabilities** | All dropped except CHOWN/SETUID/SETGID/SETPCAP (entrypoint setup) and NET_ADMIN/NET_RAW (firewall). Bounding set cleared after init. |
 | **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
-| **Privilege drop** | Starts as root for setup, drops to UID 501 via `gosu`. No `sudo` in image. `no-new-privileges` prevents escalation. |
+| **Privilege drop** | Starts as root for setup, drops to UID 501 via `setpriv` with empty bounding set. No `sudo` in image. `no-new-privileges` prevents escalation. |
 | **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
 
@@ -100,7 +100,7 @@ Only the specified directory is mounted at `/workspace`. Claude cannot see other
 
 These are consumed by `run-claude.sh` itself:
 
-- `--rebuild` — Rebuild image with `--no-cache` (runs lint first)
+- `--rebuild` — Rebuild image (runs lint, skips if already up-to-date, uses targeted cache bust)
 - `--fresh-creds` — Overwrite credentials with current keychain values
 - `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
@@ -162,7 +162,7 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild ~/Projects/my-projec
 │  │  │  Read-only rootfs + seccomp + no caps    │  │  │
 │  │  │  iptables allowlist (Anthropic/GitHub/…) │  │  │
 │  │  │                                          │  │  │
-│  │  │  Starts as root → gosu drops to claude   │  │  │
+│  │  │  Starts as root → setpriv drops to claude   │  │  │
 │  │  │  Claude Code CLI (native binary)         │  │  │
 │  │  │                                          │  │  │
 │  │  │  Mounts:                                 │  │  │
@@ -198,7 +198,7 @@ Expired credentials are automatically detected on container start and replaced w
 ./run-claude.sh --rebuild
 ```
 
-This rebuilds the image with `--no-cache`, pulling the latest Claude Code binary. Linting runs automatically before the build.
+This checks the latest Claude Code version, skips the rebuild if the image is already up-to-date, and uses targeted cache invalidation to pull only the Claude Code binary layer. Linting runs automatically before the build.
 
 ## Troubleshooting
 
@@ -295,7 +295,7 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 
 ## File Reference
 
-- **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, `gosu` for privilege drop
+- **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, `setpriv` for privilege drop
 - **entrypoint.sh** — Firewall init, credential setup, gitconfig (on volume), privilege drop
 - **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch
 - **init-firewall.sh** — iptables chain setup, calls `reload-firewall.sh`, connectivity verification
