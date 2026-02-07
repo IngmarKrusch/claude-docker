@@ -24,8 +24,13 @@ Options:
                           even if unexpired credentials exist in the container.
                           Useful after running 'claude login' on the host.
   --isolate-claude-data   Use a named Docker volume ('claude-data') instead of
-                          bind-mounting the host's ~/.claude/ directory.
+                          the default read-only host mount + writable tmpfs.
                           Required for Docker Desktop (see below).
+  --no-sync-back          Disable sync-back of session data to host on exit.
+                          By default, session artifacts (transcripts, memory,
+                          plans, etc.) are synced back when the container
+                          exits cleanly. settings.json and user-level CLAUDE.md
+                          are NEVER synced back regardless of this flag.
   --with-gvisor           Use gVisor (runsc) runtime if available. By default
                           the standard runc runtime is used, which is best for
                           OrbStack. Note: the iptables firewall does not work
@@ -44,19 +49,22 @@ Security layers:
   core dumps disabled (ulimit -c 0), git wrapper at all entry points
   (/usr/bin/git, /usr/lib/git-core/git) enforcing hooksPath=/dev/null and
   credential.helper (immune to local config override), GitHub token scoped
-  to workspace repo only, and privilege drop to UID 501 via setpriv.
+  to workspace repo only, privilege drop to UID 501 via setpriv, and
+  ~/.claude mount isolation (read-only host mount + writable tmpfs, settings.json
+  and user-level CLAUDE.md never synced back to host).
 
 Runtime compatibility:
   OrbStack (recommended):
     ./run-claude.sh ~/Projects/my-project
-    Bind-mounts ~/.claude/ for shared state with the host. Firewall and all
-    hardening layers work out of the box.
+    Mounts host ~/.claude/ read-only with writable tmpfs overlay. Session
+    data syncs back on clean exit. Firewall and all hardening layers work
+    out of the box.
 
   Docker Desktop:
     ./run-claude.sh --isolate-claude-data ~/Projects/my-project
     Requires --isolate-claude-data because Docker Desktop's file sharing
-    has permission issues with bind-mounted ~/.claude/. Uses a named Docker
-    volume instead. To reset state: docker volume rm claude-data
+    has permission issues with bind-mounts. Uses a named Docker volume
+    instead. To reset state: docker volume rm claude-data
 
 Argument routing:
   Script options (--rebuild, --fresh-creds, etc.) are consumed by the script.
@@ -64,8 +72,8 @@ Argument routing:
   is an existing directory becomes PROJECT_DIR. All remaining arguments go
   to claude as CLAUDE_ARGS.
 
-  Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --with-gvisor,
-                 --reload-firewall
+  Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --no-sync-back,
+                 --with-gvisor, --reload-firewall
   Claude flags:  --continue, --resume, -p, --allowedTools, --model, etc.
 
 Examples:
@@ -86,6 +94,7 @@ EOF
 REBUILD=false
 FRESH_CREDS=false
 ISOLATE_DATA=false
+SYNC_BACK=true
 WITH_GVISOR=false
 RELOAD_FIREWALL=false
 ARGS=()
@@ -95,6 +104,7 @@ for arg in "$@"; do
         --rebuild) REBUILD=true ;;
         --fresh-creds) FRESH_CREDS=true ;;
         --isolate-claude-data) ISOLATE_DATA=true ;;
+        --no-sync-back) SYNC_BACK=false ;;
         --with-gvisor) WITH_GVISOR=true ;;
         --reload-firewall) RELOAD_FIREWALL=true ;;
         *) ARGS+=("$arg") ;;
@@ -237,9 +247,12 @@ if [ -n "$GH_TOKEN" ]; then
     GH_TOKEN_FLAG="-e GITHUB_TOKEN=$GH_TOKEN"
 fi
 
-# Determine Claude data mount: bind-mount host ~/.claude by default, or use named volume with --isolate-claude-data
+# Determine Claude data mount strategy
+CLAUDE_MOUNT_FLAGS=""
+SYNC_BACK_FLAGS=""
 if [ "$ISOLATE_DATA" = true ]; then
-    CLAUDE_DATA_MOUNT="claude-data:/home/claude/.claude"
+    CLAUDE_MOUNT_FLAGS="-v claude-data:/home/claude/.claude"
+    SYNC_BACK=false
     log "[sandbox] Using isolated data volume"
 else
     # Ensure host ~/.claude directory exists with initial config
@@ -248,11 +261,22 @@ else
         echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$HOME/.claude/.config.json"
         log "[sandbox] Created initial config"
     fi
-    CLAUDE_DATA_MOUNT="$HOME/.claude:/home/claude/.claude"
-    log "[sandbox] Sharing ~/.claude with host (use --isolate-claude-data for isolation)"
+
+    # Read-only host mount at alternate path + writable tmpfs at real path
+    CLAUDE_MOUNT_FLAGS="-v $HOME/.claude:/home/claude/.claude-host:ro --tmpfs /home/claude/.claude:rw,nosuid,size=512m"
+    log "[sandbox] Mounting ~/.claude read-only (writes go to tmpfs)"
+
+    # Set up sync-back staging directory
+    if [ "$SYNC_BACK" = true ]; then
+        SYNC_DIR="$HOME/.claude/.sync-back"
+        mkdir -p "$SYNC_DIR"
+        SYNC_BACK_FLAGS="-v $SYNC_DIR:/home/claude/.claude-sync:rw -e SYNC_BACK=1"
+        log "[sandbox] Sync-back enabled (use --no-sync-back to disable)"
+    fi
 fi
 
 set +e
+# shellcheck disable=SC2086
 docker run --rm -it \
     --init \
     $RUNTIME_FLAG \
@@ -279,11 +303,25 @@ docker run --rm -it \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
-    -v "$CLAUDE_DATA_MOUNT" \
+    $CLAUDE_MOUNT_FLAGS \
+    $SYNC_BACK_FLAGS \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
 DOCKER_EXIT=$?
 set -e
+
+# Sync-back: merge staged data into host ~/.claude/
+if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
+    echo "[sandbox] Syncing session data back to host..."
+    rsync -a \
+        --exclude='settings.json' \
+        --exclude='settings.local.json' \
+        --exclude='CLAUDE.md' \
+        "$HOME/.claude/.sync-back/data/" "$HOME/.claude/"
+    echo "[sandbox] Sync complete"
+fi
+# Clean up sync staging directory
+rm -rf "$HOME/.claude/.sync-back" 2>/dev/null || true
 
 if [ -n "$LAUNCH_LOG" ]; then
     echo ""

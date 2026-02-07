@@ -35,13 +35,39 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 
 | Layer | Protection |
 |-------|-----------|
-| **Filesystem** | Read-only rootfs. Only `/workspace` and `~/.claude` are writable. `/tmp` is a noexec tmpfs. |
+| **Filesystem** | Read-only rootfs. `/workspace` is writable. `~/.claude` is a writable tmpfs populated from a read-only host mount at startup — container writes never reach the host directly. `/tmp` is a noexec tmpfs. |
 | **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret, and other high-risk syscalls. |
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID/SETPCAP (entrypoint setup) and NET_ADMIN/NET_RAW (firewall). Bounding set cleared after init. |
 | **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `setpriv` with empty bounding set. No `sudo` in image. `no-new-privileges` prevents escalation. |
-| **Credentials** | OAuth tokens written to file inside container; env var cleared before exec. Tokens persist in `~/.claude/` (shared with host by default). GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
+| **Credentials** | OAuth tokens written to file inside container (tmpfs); env var cleared before exec. Tokens never persist to host. GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
+
+### `~/.claude/` mount isolation
+
+The host's `~/.claude/` is mounted **read-only** at `~/.claude-host` inside the container. A writable **tmpfs** is mounted at `~/.claude`. At startup, the entrypoint copies only the data needed for the current session:
+
+- `.config.json`, `settings.json`, `settings.local.json`, `CLAUDE.md` (read snapshots)
+- `history.jsonl` (for `--continue`/`--resume`)
+- Current project's `projects/<path>/` data (memory + transcripts)
+- `statsig/`, `plugins/`, `stats-cache.json`
+
+**What this protects against:**
+
+| Attack | Protection |
+|--------|-----------|
+| **Settings escalation** — write `{"permissions":{"allow":["Bash(*)"]}}` to `settings.json` | Writes go to tmpfs; `settings.json` is never synced back to host |
+| **CLAUDE.md poisoning** — inject malicious instructions into user-level `~/.claude/CLAUDE.md` | Writes go to tmpfs; user-level `CLAUDE.md` is never synced back to host |
+| **Plugin injection** — modify host plugins for persistent compromise | Writes go to tmpfs; lost on exit (plugins do sync back by default) |
+
+**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Two files are **never** synced back regardless of settings:
+
+- `settings.json` / `settings.local.json` — prevents tool auto-approval escalation
+- `CLAUDE.md` (user-level) — prevents persistent prompt injection
+
+Use `--no-sync-back` to disable all sync-back. Project-level `/workspace/CLAUDE.md` is unaffected by this protection (writable via the workspace mount).
+
+**Note:** `--resume <session-id>` from a *different* project won't work because only the current project's transcripts are copied. Sync-back only fires on clean exit (Ctrl+C, `/exit`, `docker stop`); `docker kill` or OOM kills skip it.
 
 ### Known trade-offs
 
@@ -49,6 +75,7 @@ Some attack surfaces are intentionally left open because closing them would brea
 
 - **`~/.npm` tmpfs requires `exec`** — npx downloads and runs binaries from `~/.npm/_npx/` (e.g. MCP servers). Using `noexec` on this mount (commit `60ca5b1`) broke MCP servers; commit `666c2bc` restored `exec`. The firewall allowlist limits what can be downloaded and executed.
 - **npm postinstall scripts** — `npm install` runs arbitrary postinstall scripts. Blocking via `--ignore-scripts` would break MCP servers that rely on npx. Mitigated by the firewall allowlist restricting network access.
+- **History readable** — The container receives host `history.jsonl` (needed for `--continue`). DNS rate-limiting slows exfiltration but does not prevent it.
 
 ## Firewall Configuration
 
@@ -102,7 +129,8 @@ These are consumed by `run-claude.sh` itself:
 
 - `--rebuild` — Rebuild image (runs lint, skips if already up-to-date, uses targeted cache bust)
 - `--fresh-creds` — Overwrite credentials with current keychain values
-- `--isolate-claude-data` — Use isolated Docker volume instead of host `~/.claude/` (required for Docker Desktop)
+- `--isolate-claude-data` — Use isolated Docker volume instead of read-only host mount + tmpfs (required for Docker Desktop)
+- `--no-sync-back` — Disable sync-back of session data to host on clean exit
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
 - `--reload-firewall` — Reload `firewall-allowlist.conf` in all running containers
 
@@ -167,7 +195,8 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild ~/Projects/my-projec
 │  │  │                                          │  │  │
 │  │  │  Mounts:                                 │  │  │
 │  │  │   /workspace ← project dir (rw)          │  │  │
-│  │  │   ~/.claude ← host ~/.claude or volume   │  │  │
+│  │  │   ~/.claude-host ← host ~/.claude (ro)   │  │  │
+│  │  │   ~/.claude ← tmpfs (rw, 512m)          │  │  │
 │  │  │   /tmp ← tmpfs (noexec, 512m)           │  │  │
 │  │  │                                          │  │  │
 │  │  │  Credential flow:                        │  │  │
@@ -186,9 +215,9 @@ Claude Max uses OAuth stored in macOS keychain under `"Claude Code-credentials"`
 
 ### Persistent state
 
-By default, the container bind-mounts the host's `~/.claude/` directory. This shares memory files, session history, and settings between the host and container. **This requires OrbStack** — Docker Desktop has permission issues with this bind-mount.
+By default, the host's `~/.claude/` is mounted **read-only** into the container. A writable tmpfs overlay is used for the session. On clean exit, session data (transcripts, memory, plans, etc.) is synced back to the host — but `settings.json` and user-level `CLAUDE.md` are **never** synced back, preventing privilege escalation and prompt injection attacks.
 
-For Docker Desktop compatibility (or harder isolation), use `--isolate-claude-data` to use a separate Docker volume (`claude-data`) instead.
+Use `--no-sync-back` to disable all sync-back. Use `--isolate-claude-data` for Docker Desktop compatibility (uses a named Docker volume instead).
 
 Expired credentials are automatically detected on container start and replaced with fresh ones from keychain. Use `--fresh-creds` to force re-injection even when credentials haven't expired.
 
@@ -257,7 +286,7 @@ If gVisor is broken, `run-claude.sh` falls back to runc automatically. You can a
 
 ### Bash commands fail with Docker Desktop
 
-Docker Desktop's file sharing (VirtioFS/gRPC FUSE) has permission issues with bind-mounts when Claude Code writes to shell-snapshots or session-env directories.
+Docker Desktop's file sharing (VirtioFS/gRPC FUSE) has permission issues with read-only bind-mounts.
 
 **Solutions:**
 1. **Switch to OrbStack** (recommended) — OrbStack's file sharing handles permissions correctly
@@ -266,14 +295,14 @@ Docker Desktop's file sharing (VirtioFS/gRPC FUSE) has permission issues with bi
    ./run-claude.sh --isolate-claude-data ~/Projects/my-project
    ```
 
-| Runtime | Bind-mount `~/.claude` | `--isolate-claude-data` |
-|---------|------------------------|-------------------------|
+| Runtime | Default (ro mount + tmpfs) | `--isolate-claude-data` |
+|---------|---------------------------|-------------------------|
 | OrbStack | ✅ Works | ✅ Works |
 | Docker Desktop | ❌ Permission errors | ✅ Works |
 
 ### Resetting Claude Code state
 
-By default, state is shared with the host in `~/.claude/`. To reset, remove files there directly.
+Session data is synced back to `~/.claude/` on clean exit. To reset, remove files there directly.
 
 If using `--isolate-claude-data`, the state lives in a Docker volume:
 
@@ -296,8 +325,8 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 ## File Reference
 
 - **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, `setpriv` for privilege drop
-- **entrypoint.sh** — Firewall init, credential setup, gitconfig (on volume), privilege drop
-- **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch
+- **entrypoint.sh** — Mount isolation (host state copy), firewall init, credential setup, gitconfig, sync-back trap, privilege drop
+- **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch, post-exit sync-back merge
 - **init-firewall.sh** — iptables chain setup, calls `reload-firewall.sh`, connectivity verification
 - **reload-firewall.sh** — Reads `firewall-allowlist.conf`, resolves domains, atomic ipset swap
 - **firewall-allowlist.conf** — Configurable domain allowlist for the container firewall

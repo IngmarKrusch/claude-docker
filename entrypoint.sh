@@ -7,7 +7,91 @@ log() {
     echo "$1"
     echo "$(date '+%H:%M:%S') $1" >> "$LOGFILE"
 }
+
+# --- Mount isolation: populate writable tmpfs from read-only host mount ---
+# When ~/.claude-host exists (read-only host mount), copy needed data into the
+# writable tmpfs at ~/.claude. This runs BEFORE the log file is opened so that
+# any host entrypoint.log doesn't conflict.
+HOST_CLAUDE="/home/claude/.claude-host"
+CLAUDE_DIR="/home/claude/.claude"
+
+if [ -d "$HOST_CLAUDE" ]; then
+    # 1. Config (required for onboarding flags, user prefs, account info)
+    cp "$HOST_CLAUDE/.config.json" "$CLAUDE_DIR/" 2>/dev/null || true
+
+    # 2. Settings (copied as read snapshot — container edits don't propagate to host)
+    cp "$HOST_CLAUDE/settings.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp "$HOST_CLAUDE/settings.local.json" "$CLAUDE_DIR/" 2>/dev/null || true
+
+    # 3. User-level CLAUDE.md (project context, memory)
+    cp "$HOST_CLAUDE/CLAUDE.md" "$CLAUDE_DIR/" 2>/dev/null || true
+
+    # 4. Full history (needed for --continue/--resume to find past sessions)
+    cp "$HOST_CLAUDE/history.jsonl" "$CLAUDE_DIR/" 2>/dev/null || true
+    # Record baseline line count so sync-back can send only new entries
+    wc -l < "$CLAUDE_DIR/history.jsonl" 2>/dev/null > "$CLAUDE_DIR/.history-baseline-lines" || true
+
+    # 5. Current project data ONLY: memory + session transcripts
+    #    Encode workspace path the same way Claude Code does (/ → -)
+    WORKSPACE_PATH=$(readlink -f /workspace)
+    ENCODED_PATH=$(echo "$WORKSPACE_PATH" | sed 's|/|-|g')
+    if [ -d "$HOST_CLAUDE/projects/$ENCODED_PATH" ]; then
+        mkdir -p "$CLAUDE_DIR/projects/$ENCODED_PATH"
+        cp -r "$HOST_CLAUDE/projects/$ENCODED_PATH/." \
+              "$CLAUDE_DIR/projects/$ENCODED_PATH/" 2>/dev/null || true
+    fi
+    # Also copy the -workspace project data (container's view of the path)
+    if [ -d "$HOST_CLAUDE/projects/-workspace" ]; then
+        mkdir -p "$CLAUDE_DIR/projects/-workspace"
+        cp -r "$HOST_CLAUDE/projects/-workspace/." \
+              "$CLAUDE_DIR/projects/-workspace/" 2>/dev/null || true
+    fi
+
+    # 6. Statsig cache (avoids re-fetching feature flags)
+    if [ -d "$HOST_CLAUDE/statsig" ]; then
+        cp -r "$HOST_CLAUDE/statsig" "$CLAUDE_DIR/" 2>/dev/null || true
+    fi
+
+    # 7. Plugins (if any installed)
+    if [ -d "$HOST_CLAUDE/plugins" ]; then
+        cp -r "$HOST_CLAUDE/plugins" "$CLAUDE_DIR/" 2>/dev/null || true
+    fi
+
+    # 8. Stats cache
+    cp "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
+
+    chown -R claude: "$CLAUDE_DIR"
+fi
+
 echo "=== Entrypoint $(date) ===" >> "$LOGFILE"
+
+if [ -d "$HOST_CLAUDE" ]; then
+    log "[sandbox] Host state loaded (read-only mount isolation active)"
+fi
+
+# --- Sync-back: EXIT trap to stage data for host merge ---
+sync_back_on_exit() {
+    local SYNC_DIR="/home/claude/.claude-sync"
+    if [ -d "$SYNC_DIR" ]; then
+        local STAGING="$SYNC_DIR/data"
+        mkdir -p "$STAGING"
+
+        # Copy everything that changed, EXCLUDING blocked and transient files
+        rsync -a \
+            --exclude='settings.json' \
+            --exclude='settings.local.json' \
+            --exclude='CLAUDE.md' \
+            --exclude='.credentials.json' \
+            --exclude='.gitconfig' \
+            --exclude='entrypoint.log' \
+            --exclude='.history-baseline-lines' \
+            "$CLAUDE_DIR/" "$STAGING/" 2>/dev/null || true
+    fi
+}
+
+if [ "${SYNC_BACK:-}" = "1" ]; then
+    trap sync_back_on_exit EXIT
+fi
 
 # Initialize firewall if NET_ADMIN capability is available
 if /usr/local/bin/init-firewall.sh 2>/dev/null; then
@@ -187,10 +271,26 @@ ulimit -c 0
 #      that don't load LD_PRELOAD.
 #   3. chmod 711 on sensitive binaries (belt-and-suspenders) — non-readable binaries
 #      cause would_dump() to set dumpable=0 on exec, independent of LD_PRELOAD.
-exec setpriv \
-    --reuid="$(id -u claude)" \
-    --regid="$(id -g claude)" \
-    --init-groups \
-    --inh-caps=-all \
-    --bounding-set=-all \
-    -- /usr/local/bin/drop-dumpable "$@"
+
+SETPRIV_CMD=(setpriv
+    --reuid="$(id -u claude)"
+    --regid="$(id -g claude)"
+    --init-groups
+    --inh-caps=-all
+    --bounding-set=-all
+    -- /usr/local/bin/drop-dumpable "$@")
+
+if [ "${SYNC_BACK:-}" = "1" ]; then
+    # Run as child process so the EXIT trap fires when it ends.
+    # exec replaces the shell, so the trap would never run.
+    "${SETPRIV_CMD[@]}" &
+    CHILD_PID=$!
+    # Forward signals to child
+    trap 'kill -TERM $CHILD_PID 2>/dev/null' TERM
+    trap 'kill -INT $CHILD_PID 2>/dev/null' INT
+    wait $CHILD_PID
+    EXIT_CODE=$?
+    exit $EXIT_CODE   # triggers sync_back_on_exit via EXIT trap
+else
+    exec "${SETPRIV_CMD[@]}"
+fi

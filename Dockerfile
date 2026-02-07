@@ -6,7 +6,7 @@ ARG GROUP_ID=20
 # System dependencies (firewall + dev tools)
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl gosu zsh fzf ripgrep jq aggregate ca-certificates \
+    git curl gosu zsh fzf ripgrep jq aggregate ca-certificates rsync \
     iptables ipset dnsutils iproute2 libcap2-bin gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
