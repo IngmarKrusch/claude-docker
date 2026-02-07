@@ -196,7 +196,7 @@ LATEST_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8
 
 # Build image if needed (or forced with --rebuild)
 if [ "$REBUILD" = true ]; then
-    echo "Linting Dockerfile..."
+    log "[sandbox] Linting Dockerfile..."
     "$SCRIPT_DIR/lint.sh"
 
     # Check if rebuild is actually needed
@@ -204,9 +204,9 @@ if [ "$REBUILD" = true ]; then
     INSTALLED_VERSION=$(docker run --rm --entrypoint claude "$IMAGE_NAME" --version 2>/dev/null | awk '{print $1}' || echo "none")
 
     if [ "$LATEST_VERSION" != "unknown" ] && [ "$LATEST_VERSION" = "$INSTALLED_VERSION" ]; then
-        echo "Claude Code $INSTALLED_VERSION is already up-to-date, skipping rebuild."
+        log "[sandbox] Claude Code $INSTALLED_VERSION is already up-to-date, skipping rebuild."
     else
-        echo "Rebuilding sandbox image (installed: ${INSTALLED_VERSION}, latest: ${LATEST_VERSION})..."
+        log "[sandbox] Rebuilding sandbox image (installed: ${INSTALLED_VERSION}, latest: ${LATEST_VERSION})..."
         docker build \
             --build-arg USER_ID=$(id -u) \
             --build-arg GROUP_ID=$(id -g) \
@@ -215,7 +215,7 @@ if [ "$REBUILD" = true ]; then
             "$SCRIPT_DIR"
     fi
 elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-    echo "Building sandbox image..."
+    log "[sandbox] Building sandbox image..."
     docker build \
         --build-arg USER_ID=$(id -u) \
         --build-arg GROUP_ID=$(id -g) \
