@@ -56,18 +56,19 @@ RUN mkdir -p /usr/local/lib \
 
 # Git wrapper: replace ALL git entry points so /usr/bin/git can't bypass the wrapper.
 # Force hooksPath=/dev/null and credential.helper on every invocation.
-# Real binary moved to /usr/libexec/git-core-wrapped. Rootfs is read-only so
-# wrapper can't be modified at runtime.
+# Real binary moved to /usr/libexec/wrapped-git (NOT git-* to avoid git's
+# argv[0] subcommand detection treating the basename as a builtin command).
+# Rootfs is read-only so wrapper can't be modified at runtime.
 RUN printf '#!/bin/sh\n\
 export GIT_CONFIG_COUNT=2\n\
 export GIT_CONFIG_KEY_0=core.hooksPath\n\
 export GIT_CONFIG_VALUE_0=/dev/null\n\
 export GIT_CONFIG_KEY_1=credential.helper\n\
 export GIT_CONFIG_VALUE_1="cache --timeout=86400 --socket=/tmp/.git-credential-cache/sock"\n\
-exec /usr/libexec/git-core-wrapped "$@"\n' > /usr/local/bin/git \
+exec /usr/libexec/wrapped-git "$@"\n' > /usr/local/bin/git \
     && chmod +x /usr/local/bin/git \
     && mkdir -p /usr/libexec \
-    && mv /usr/bin/git /usr/libexec/git-core-wrapped \
+    && mv /usr/bin/git /usr/libexec/wrapped-git \
     && cp /usr/local/bin/git /usr/bin/git \
     && cp /usr/local/bin/git /usr/lib/git-core/git
 
@@ -76,7 +77,7 @@ exec /usr/libexec/git-core-wrapped "$@"\n' > /usr/local/bin/git \
 # preventing /proc/<pid>/mem access even without LD_PRELOAD.
 # Note: chmod 711 on claude may break Electron resource loading; if so, remove it.
 RUN chmod 711 /usr/local/bin/claude \
-    && chmod 711 /usr/libexec/git-core-wrapped
+    && chmod 711 /usr/libexec/wrapped-git
 
 # Purge compiler toolchain — prevents attacker from compiling exploit code,
 # LD_PRELOAD injection libraries, or other tools inside the sandbox.
