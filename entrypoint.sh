@@ -270,8 +270,9 @@ ulimit -c 0
 #   2. drop-dumpable (defense-in-depth) — sets dumpable=0 BEFORE exec. Ineffective
 #      alone (kernel resets it), but provides a fallback for statically-linked binaries
 #      that don't load LD_PRELOAD.
-#   3. chmod 711 on sensitive binaries (belt-and-suspenders) — non-readable binaries
+#   3. chmod 711 on wrapped-git (belt-and-suspenders) — non-readable binaries
 #      cause would_dump() to set dumpable=0 on exec, independent of LD_PRELOAD.
+#      (claude is excluded: Bun single-file executables must read themselves.)
 
 SETPRIV_CMD=(setpriv
     --reuid="$(id -u claude)"

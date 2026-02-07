@@ -75,9 +75,9 @@ exec /usr/libexec/wrapped-git "$@"\n' > /usr/local/bin/git \
 # Make sensitive binaries non-readable by UID 501 (belt-and-suspenders with nodump.so).
 # When exec'ing a non-readable binary, the kernel's would_dump() sets dumpable=0,
 # preventing /proc/<pid>/mem access even without LD_PRELOAD.
-# Note: chmod 711 on claude may break Electron resource loading; if so, remove it.
-RUN chmod 711 /usr/local/bin/claude \
-    && chmod 711 /usr/libexec/wrapped-git
+# Note: claude is excluded — it's a Bun single-file executable that must read itself
+# to extract embedded JavaScript. Primary /proc/mem protection is via nodump.so.
+RUN chmod 711 /usr/libexec/wrapped-git
 
 # Purge compiler toolchain — prevents attacker from compiling exploit code,
 # LD_PRELOAD injection libraries, or other tools inside the sandbox.
