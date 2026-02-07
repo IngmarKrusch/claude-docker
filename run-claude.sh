@@ -148,6 +148,31 @@ if [ -z "$CREDS" ]; then
     exit 1
 fi
 
+# Auto-refresh expired keychain credentials by running native claude on the host.
+# The container can't update the macOS keychain, so only a host-side refresh works.
+EXPIRES_AT=$(python3 -c "
+import json, sys
+creds = json.loads(sys.stdin.read())
+print(creds.get('claudeAiOauth', {}).get('expiresAt', 0))
+" <<< "$CREDS" 2>/dev/null || echo 0)
+NOW_MS=$(( $(date +%s) * 1000 ))
+BUFFER_MS=300000  # 5 minutes
+
+if [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT" -le $((NOW_MS + BUFFER_MS)) ]; then
+    echo "[sandbox] Keychain access token expired, refreshing via host claude..."
+    if timeout 30 claude -p "." --max-turns 1 > /dev/null 2>&1; then
+        # Re-extract refreshed credentials
+        CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+        if [ -z "$CREDS" ]; then
+            echo "Error: Keychain credentials lost during refresh."
+            exit 1
+        fi
+        echo "[sandbox] Credentials refreshed successfully"
+    else
+        echo "[sandbox] Warning: Auto-refresh failed. If you get auth errors, run: claude login"
+    fi
+fi
+
 # Extract GitHub token from host (for git push inside container)
 GH_TOKEN=$(gh auth token 2>/dev/null || true)
 if [ -n "$GH_TOKEN" ]; then
