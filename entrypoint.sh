@@ -121,8 +121,8 @@ fi
 if [ -n "$CLAUDE_CREDENTIALS" ]; then
     if [ ! -f "$CREDS_FILE" ] || [ "${FORCE_CREDENTIALS:-}" = "1" ] || [ "$EXPIRED" = true ]; then
         echo "$CLAUDE_CREDENTIALS" > "$CREDS_FILE"
-        chown claude: "$CREDS_FILE"
         chmod 600 "$CREDS_FILE"
+        chown claude: "$CREDS_FILE"
         if [ "${FORCE_CREDENTIALS:-}" = "1" ]; then
             log "[sandbox] Credentials force-refreshed from keychain"
         elif [ "$EXPIRED" = true ]; then
@@ -138,7 +138,6 @@ if [ -n "$CLAUDE_CREDENTIALS" ]; then
     unset CLAUDE_CREDENTIALS
     unset FORCE_CREDENTIALS
 elif [ -f "$CREDS_FILE" ]; then
-    chmod 600 "$CREDS_FILE"
     log "[sandbox] Credentials loaded (from volume)"
 else
     log "[sandbox] Warning: No credentials found. Run 'claude login' or mount credentials."
