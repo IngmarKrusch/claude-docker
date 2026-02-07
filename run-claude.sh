@@ -2,6 +2,9 @@
 # run-claude.sh - Launch Claude Code in a sandboxed Docker container
 set -e
 
+LAUNCH_LOG=""
+log() { echo "$1"; LAUNCH_LOG+="$1"$'\n'; }
+
 usage() {
     cat <<'EOF'
 Usage: run-claude.sh [OPTIONS] [PROJECT_DIR] [CLAUDE_ARGS...]
@@ -159,7 +162,7 @@ NOW_MS=$(( $(date +%s) * 1000 ))
 BUFFER_MS=300000  # 5 minutes
 
 if [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT" -le $((NOW_MS + BUFFER_MS)) ]; then
-    echo "[sandbox] Keychain access token expired, refreshing via host claude..."
+    log "[sandbox] Keychain access token expired, refreshing via host claude..."
     if timeout 30 claude -p "." --max-turns 1 > /dev/null 2>&1; then
         # Re-extract refreshed credentials
         CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
@@ -167,16 +170,16 @@ if [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT" -le $((NOW_MS + BUFFER_MS)) ]; the
             echo "Error: Keychain credentials lost during refresh."
             exit 1
         fi
-        echo "[sandbox] Credentials refreshed successfully"
+        log "[sandbox] Credentials refreshed successfully"
     else
-        echo "[sandbox] Warning: Auto-refresh failed. If you get auth errors, run: claude login"
+        log "[sandbox] Warning: Auto-refresh failed. If you get auth errors, run: claude login"
     fi
 fi
 
 # Extract GitHub token from host (for git push inside container)
 GH_TOKEN=$(gh auth token 2>/dev/null || true)
 if [ -n "$GH_TOKEN" ]; then
-    echo "[sandbox] GitHub token found"
+    log "[sandbox] GitHub token found"
 fi
 
 LATEST_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest"
@@ -215,9 +218,9 @@ RUNTIME_FLAG=""
 if [ "$WITH_GVISOR" = true ]; then
     if docker info 2>/dev/null | grep -q runsc; then
         RUNTIME_FLAG="--runtime=runsc"
-        echo "[sandbox] Using gVisor runtime (note: firewall inactive with gVisor)"
+        log "[sandbox] Using gVisor runtime (note: firewall inactive with gVisor)"
     else
-        echo "[sandbox] Warning: --with-gvisor requested but runsc not available, using runc"
+        log "[sandbox] Warning: --with-gvisor requested but runsc not available, using runc"
     fi
 fi
 
@@ -237,18 +240,19 @@ fi
 # Determine Claude data mount: bind-mount host ~/.claude by default, or use named volume with --isolate-claude-data
 if [ "$ISOLATE_DATA" = true ]; then
     CLAUDE_DATA_MOUNT="claude-data:/home/claude/.claude"
-    echo "[sandbox] Using isolated data volume"
+    log "[sandbox] Using isolated data volume"
 else
     # Ensure host ~/.claude directory exists with initial config
     mkdir -p "$HOME/.claude"
     if [ ! -f "$HOME/.claude/.config.json" ]; then
         echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$HOME/.claude/.config.json"
-        echo "[sandbox] Created initial config"
+        log "[sandbox] Created initial config"
     fi
     CLAUDE_DATA_MOUNT="$HOME/.claude:/home/claude/.claude"
-    echo "[sandbox] Sharing ~/.claude with host (use --isolate-claude-data for isolation)"
+    log "[sandbox] Sharing ~/.claude with host (use --isolate-claude-data for isolation)"
 fi
 
+set +e
 docker run --rm -it \
     --init \
     $RUNTIME_FLAG \
@@ -278,3 +282,13 @@ docker run --rm -it \
     -v "$CLAUDE_DATA_MOUNT" \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
+DOCKER_EXIT=$?
+set -e
+
+if [ -n "$LAUNCH_LOG" ]; then
+    echo ""
+    echo "[sandbox] Launch log:"
+    printf '%s' "$LAUNCH_LOG"
+fi
+
+exit $DOCKER_EXIT
