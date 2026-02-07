@@ -3,9 +3,13 @@ set -e
 
 # Log entrypoint messages (Claude Code clears the terminal, so we log to file too)
 LOGFILE="/home/claude/.claude/entrypoint.log"
+HOST_LOG="${ENTRYPOINT_LOG:-}"
 log() {
     echo "$1"
     echo "$(date '+%H:%M:%S') $1" >> "$LOGFILE"
+    if [ -n "$HOST_LOG" ]; then
+        echo "$1" >> "$HOST_LOG" || true
+    fi
 }
 
 # --- Mount isolation: populate writable tmpfs from read-only host mount ---

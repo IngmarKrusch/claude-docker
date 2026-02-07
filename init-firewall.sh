@@ -2,6 +2,13 @@
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting
 
+_log() {
+    echo "$1"
+    if [ -n "${ENTRYPOINT_LOG:-}" ]; then
+        echo "[sandbox] $1" >> "$ENTRYPOINT_LOG" || true
+    fi
+}
+
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
@@ -16,21 +23,21 @@ ipset destroy allowed-domains 2>/dev/null || true
 
 # 2. Selectively restore ONLY internal Docker DNS resolution
 if [ -n "$DOCKER_DNS_RULES" ]; then
-    echo "Restoring Docker DNS rules..."
+    _log "Restoring Docker DNS rules..."
     iptables -t nat -N DOCKER_OUTPUT 2>/dev/null || true
     iptables -t nat -N DOCKER_POSTROUTING 2>/dev/null || true
     echo "$DOCKER_DNS_RULES" | xargs -L 1 iptables -t nat
 else
-    echo "No Docker DNS rules to restore"
+    _log "No Docker DNS rules to restore"
 fi
 
 # Auto-detect the actual DNS resolver (OrbStack uses 0.250.250.200, Docker Desktop uses 127.0.0.11)
 DNS_RESOLVER=$(awk '/^nameserver/ { print $2; exit }' /etc/resolv.conf)
 if [ -z "$DNS_RESOLVER" ]; then
     DNS_RESOLVER="127.0.0.11"
-    echo "WARNING: Could not detect DNS resolver, falling back to $DNS_RESOLVER"
+    _log "WARNING: Could not detect DNS resolver, falling back to $DNS_RESOLVER"
 fi
-echo "DNS resolver detected as: $DNS_RESOLVER"
+_log "DNS resolver detected as: $DNS_RESOLVER"
 
 # Rate-limit and size-limit DNS to mitigate DNS tunneling exfiltration.
 # DNS is pinned to the internal resolver (no direct external DNS), but the
@@ -61,12 +68,12 @@ ipset create allowed-domains hash:net
 # Get host IP from default route
 HOST_IP=$(ip route | grep default | cut -d" " -f3)
 if [ -z "$HOST_IP" ]; then
-    echo "ERROR: Failed to detect host IP"
+    _log "ERROR: Failed to detect host IP"
     exit 1
 fi
 
 HOST_NETWORK=$(echo "$HOST_IP" | sed "s/\.[0-9]*$/.0\/24/")
-echo "Host network detected as: $HOST_NETWORK"
+_log "Host network detected as: $HOST_NETWORK"
 
 # Set up remaining iptables rules
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
@@ -89,19 +96,19 @@ iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 # Explicitly REJECT all other outbound traffic for immediate feedback
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
-echo "Firewall configuration complete"
-echo "Verifying firewall rules..."
+_log "Firewall configuration complete"
+_log "Verifying firewall rules..."
 if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
-    echo "ERROR: Firewall verification failed - was able to reach https://example.com"
+    _log "ERROR: Firewall verification failed - was able to reach https://example.com"
     exit 1
 else
-    echo "Firewall verification passed - unable to reach https://example.com as expected"
+    _log "Firewall verification passed - unable to reach https://example.com as expected"
 fi
 
 # Verify GitHub API access
 if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
-    echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"
+    _log "ERROR: Firewall verification failed - unable to reach https://api.github.com"
     exit 1
 else
-    echo "Firewall verification passed - able to reach https://api.github.com as expected"
+    _log "Firewall verification passed - able to reach https://api.github.com as expected"
 fi

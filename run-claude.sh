@@ -275,6 +275,8 @@ else
     fi
 fi
 
+ENTRYPOINT_LOG=$(mktemp)
+
 set +e
 # shellcheck disable=SC2086
 docker run --rm -it \
@@ -305,10 +307,17 @@ docker run --rm -it \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     $CLAUDE_MOUNT_FLAGS \
     $SYNC_BACK_FLAGS \
+    -v "$ENTRYPOINT_LOG":/run/entrypoint.log \
+    -e ENTRYPOINT_LOG=/run/entrypoint.log \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
 DOCKER_EXIT=$?
 set -e
+
+if [ -f "$ENTRYPOINT_LOG" ] && [ -s "$ENTRYPOINT_LOG" ]; then
+    LAUNCH_LOG+="$(cat "$ENTRYPOINT_LOG")"$'\n'
+fi
+rm -f "$ENTRYPOINT_LOG" 2>/dev/null || true
 
 # Sync-back: merge staged data into host ~/.claude/
 if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
