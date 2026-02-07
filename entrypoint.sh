@@ -63,8 +63,6 @@ if [ -d "$HOST_CLAUDE" ]; then
 
     # 8. Stats cache
     cp "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
-
-    chown -R claude: "$CLAUDE_DIR"
 fi
 
 echo "=== Entrypoint $(date) ===" >> "$LOGFILE"
@@ -122,7 +120,6 @@ if [ -n "$CLAUDE_CREDENTIALS" ]; then
     if [ ! -f "$CREDS_FILE" ] || [ "${FORCE_CREDENTIALS:-}" = "1" ] || [ "$EXPIRED" = true ]; then
         echo "$CLAUDE_CREDENTIALS" > "$CREDS_FILE"
         chmod 600 "$CREDS_FILE"
-        chown claude: "$CREDS_FILE"
         if [ "${FORCE_CREDENTIALS:-}" = "1" ]; then
             log "[sandbox] Credentials force-refreshed from keychain"
         elif [ "$EXPIRED" = true ]; then
@@ -162,14 +159,13 @@ fi
 CONFIG_FILE="/home/claude/.claude/.config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$CONFIG_FILE"
-    chown claude: "$CONFIG_FILE"
 fi
 
 # Build writable .gitconfig on the volume (rootfs is read-only)
 GITCONFIG="/home/claude/.claude/.gitconfig"
 if [ -f /tmp/host-gitconfig ]; then
     cp /tmp/host-gitconfig "$GITCONFIG"
-    chown claude: "$GITCONFIG"
+    chmod 644 "$GITCONFIG"
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git config --global --add safe.directory /workspace
     # Strip host credential helpers (e.g. macOS GCM) that don't exist in the container
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
@@ -245,8 +241,10 @@ if [ -n "$GITHUB_TOKEN" ]; then
     unset _REMOTE_URL _REPO_PATH
 fi
 
-# Fix ownership on tmpfs mounts (Docker creates them as root)
-chown claude: /home/claude/.npm /home/claude/.config 2>/dev/null || true
+# Transfer ownership of all tmpfs content to claude before privilege drop.
+# Done here (not earlier) because root without CAP_DAC_OVERRIDE cannot write
+# to directories/files owned by other users — all root writes must complete first.
+chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/null || true
 
 # Set user environment variables that 'USER claude' in Dockerfile would have
 # provided. gosu only changes uid/gid, it does not set these.

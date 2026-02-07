@@ -199,21 +199,36 @@ if [ "$REBUILD" = true ]; then
     log "[sandbox] Linting Dockerfile..."
     "$SCRIPT_DIR/lint.sh"
 
-    # Check if rebuild is actually needed
+    # Check if Claude Code version is outdated (determines whether to bust npm cache)
     LATEST_VERSION=$(curl -fsSL "$LATEST_URL" 2>/dev/null || echo "unknown")
     INSTALLED_VERSION=$(docker run --rm --entrypoint claude "$IMAGE_NAME" --version 2>/dev/null | awk '{print $1}' || echo "none")
 
-    if [ "$LATEST_VERSION" != "unknown" ] && [ "$LATEST_VERSION" = "$INSTALLED_VERSION" ]; then
-        log "[sandbox] Claude Code $INSTALLED_VERSION is already up-to-date, skipping rebuild."
-    else
+    # Persist CACHE_BUST so scripts-only rebuilds reuse the same value.
+    # Docker treats "ARG not passed" and "ARG=empty" as different cache keys,
+    # so we must replay the exact same --build-arg invocation as the last build.
+    CACHE_FILE="$SCRIPT_DIR/.last-cache-bust"
+    CACHE_BUST_FLAG=""
+    if [ "$LATEST_VERSION" = "unknown" ] || [ "$LATEST_VERSION" != "$INSTALLED_VERSION" ]; then
         log "[sandbox] Rebuilding sandbox image (installed: ${INSTALLED_VERSION}, latest: ${LATEST_VERSION})..."
-        docker build \
-            --build-arg USER_ID=$(id -u) \
-            --build-arg GROUP_ID=$(id -g) \
-            --build-arg CACHE_BUST=$(date +%s) \
-            -t "$IMAGE_NAME" \
-            "$SCRIPT_DIR"
+        CACHE_VAL=$(date +%s)
+        echo "$CACHE_VAL" > "$CACHE_FILE"
+        CACHE_BUST_FLAG="--build-arg CACHE_BUST=$CACHE_VAL"
+    else
+        log "[sandbox] Claude Code $INSTALLED_VERSION is current, rebuilding scripts only..."
+        if [ -f "$CACHE_FILE" ]; then
+            CACHE_BUST_FLAG="--build-arg CACHE_BUST=$(cat "$CACHE_FILE")"
+        fi
     fi
+
+    # Always rebuild — Docker layer cache handles unchanged layers efficiently.
+    # CACHE_BUST only changes when Claude Code version is outdated.
+    # shellcheck disable=SC2086
+    docker build \
+        --build-arg USER_ID=$(id -u) \
+        --build-arg GROUP_ID=$(id -g) \
+        $CACHE_BUST_FLAG \
+        -t "$IMAGE_NAME" \
+        "$SCRIPT_DIR"
 elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     log "[sandbox] Building sandbox image..."
     docker build \
