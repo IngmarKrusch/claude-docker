@@ -59,7 +59,7 @@ RUN mkdir -p /usr/local/lib \
 # Real binary moved to /usr/libexec/wrapped-git (NOT git-* to avoid git's
 # argv[0] subcommand detection treating the basename as a builtin command).
 # Rootfs is read-only so wrapper can't be modified at runtime.
-# hadolint ignore=SC1003
+# hadolint ignore=SC1003,SC2016
 RUN printf '#!/bin/sh\n\
 # Block dangerous git operations\n\
 case "$1" in\n\
