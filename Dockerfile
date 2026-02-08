@@ -60,6 +60,41 @@ RUN mkdir -p /usr/local/lib \
 # argv[0] subcommand detection treating the basename as a builtin command).
 # Rootfs is read-only so wrapper can't be modified at runtime.
 RUN printf '#!/bin/sh\n\
+# Block dangerous git operations\n\
+case "$1" in\n\
+  push)\n\
+    if [ "${ALLOW_GIT_PUSH:-}" != "1" ]; then\n\
+      echo "error: git push is disabled in the sandbox (use --allow-git-push to enable)" >&2\n\
+      exit 1\n\
+    fi\n\
+    ;;\n\
+  remote)\n\
+    case "${2:-}" in\n\
+      add|set-url|rename)\n\
+        echo "error: git remote modification is disabled in the sandbox" >&2\n\
+        exit 1\n\
+        ;;\n\
+    esac\n\
+    ;;\n\
+  config)\n\
+    _skip=1\n\
+    _key=""\n\
+    for _a in "$@"; do\n\
+      if [ "$_skip" = 1 ]; then _skip=0; continue; fi\n\
+      case "$_a" in\n\
+        -*) ;;\n\
+        *) _key="$_a"; break ;;\n\
+      esac\n\
+    done\n\
+    case "$_key" in\n\
+      core.fsmonitor|core.sshCommand|core.pager|core.editor|core.hooksPath|\\\n\
+      diff.*.textconv|filter.*|credential.helper)\n\
+        echo "error: setting '\\''$_key'\\'' is blocked in the sandbox" >&2\n\
+        exit 1\n\
+        ;;\n\
+    esac\n\
+    ;;\n\
+esac\n\
 export GIT_CONFIG_COUNT=2\n\
 export GIT_CONFIG_KEY_0=core.hooksPath\n\
 export GIT_CONFIG_VALUE_0=/dev/null\n\
@@ -97,6 +132,8 @@ RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/reload-firewall.sh
 # Entrypoint
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+RUN mkdir -p /mnt/.claude-host && chmod 700 /mnt/.claude-host
 
 RUN mkdir -p /workspace && chown ${USER_ID}:${GROUP_ID} /workspace
 RUN mkdir -p /home/claude/.claude && chown ${USER_ID}:${GROUP_ID} /home/claude/.claude

@@ -9,7 +9,7 @@ Run Claude Code CLI in a hardened Docker container with defense-in-depth isolati
   - **Docker Desktop** — works with `--isolate-claude-data` flag
 - Claude Code installed on host (`curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials stored in keychain)
-- (Optional) GitHub CLI authenticated (`gh auth login`) — enables `git push` from inside the container
+- (Optional) GitHub CLI authenticated (`gh auth login`) — enables `git push` from inside the container (blocked by default; requires `--allow-git-push`). Use a fine-grained PAT scoped to the target repo for best security.
 
 ## Quick Start
 
@@ -35,7 +35,8 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 
 | Layer | Protection |
 |-------|-----------|
-| **Filesystem** | Read-only rootfs. `/workspace` is writable. `~/.claude` is a writable tmpfs populated from a read-only host mount at startup — container writes never reach the host directly. `/tmp` is a noexec tmpfs. |
+| **Filesystem** | Read-only rootfs. `/workspace` is writable. `~/.claude` is a writable tmpfs populated from a read-only host mount (`/mnt/.claude-host`, root-only) at startup — container writes never reach the host directly. `/tmp` is a noexec tmpfs. |
+| **Git operations** | `git push` blocked by default (opt in with `--allow-git-push`). `git remote add/set-url/rename` blocked. Dangerous `git config` keys blocked (`core.fsmonitor`, `core.sshCommand`, `filter.*`, etc.). Hook execution neutralized via `hooksPath=/dev/null`. |
 | **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret, and other high-risk syscalls. |
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID/SETPCAP (entrypoint setup) and NET_ADMIN/NET_RAW (firewall). Bounding set cleared after init. |
 | **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
@@ -45,7 +46,7 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 
 ### `~/.claude/` mount isolation
 
-The host's `~/.claude/` is mounted **read-only** at `~/.claude-host` inside the container. A writable **tmpfs** is mounted at `~/.claude`. At startup, the entrypoint copies only the data needed for the current session:
+The host's `~/.claude/` is mounted **read-only** at `/mnt/.claude-host` (a root-only path, `chmod 700`) inside the container. A writable **tmpfs** is mounted at `~/.claude`. At startup, the entrypoint (running as root) copies only the data needed for the current session. After privilege drop to UID 501, `/mnt/.claude-host` is inaccessible:
 
 - `.config.json`, `settings.json`, `settings.local.json`, `CLAUDE.md` (read snapshots)
 - `history.jsonl` (for `--continue`/`--resume`)
@@ -59,8 +60,9 @@ The host's `~/.claude/` is mounted **read-only** at `~/.claude-host` inside the 
 | **Settings escalation** — write `{"permissions":{"allow":["Bash(*)"]}}` to `settings.json` | Writes go to tmpfs; `settings.json` is never synced back to host |
 | **CLAUDE.md poisoning** — inject malicious instructions into user-level `~/.claude/CLAUDE.md` | Writes go to tmpfs; user-level `CLAUDE.md` is never synced back to host |
 | **Plugin injection** — modify host plugins for persistent compromise | Writes go to tmpfs; lost on exit (plugins do sync back by default) |
+| **Cross-project data leakage** — read other projects' memories, sessions, history | Host mount at root-only path (`/mnt/.claude-host`), inaccessible after init; only current project data copied |
 
-**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Two files are **never** synced back regardless of settings:
+**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Sync-back uses `rsync --safe-links` to prevent symlink planting attacks (symlinks pointing outside the source tree are silently skipped). Two files are **never** synced back regardless of settings:
 
 - `settings.json` / `settings.local.json` — prevents tool auto-approval escalation
 - `CLAUDE.md` (user-level) — prevents persistent prompt injection
@@ -75,7 +77,7 @@ Some attack surfaces are intentionally left open because closing them would brea
 
 - **`~/.npm` tmpfs requires `exec`** — npx downloads and runs binaries from `~/.npm/_npx/` (e.g. MCP servers). Using `noexec` on this mount (commit `60ca5b1`) broke MCP servers; commit `666c2bc` restored `exec`. The firewall allowlist limits what can be downloaded and executed.
 - **npm postinstall scripts** — `npm install` runs arbitrary postinstall scripts. Blocking via `--ignore-scripts` would break MCP servers that rely on npx. Mitigated by the firewall allowlist restricting network access.
-- **History readable** — The container receives host `history.jsonl` (needed for `--continue`). DNS rate-limiting slows exfiltration but does not prevent it.
+- **History readable** — The container receives host `history.jsonl` (needed for `--continue`). DNS rate-limiting (~100 B/s) makes exfiltration impractical but does not prevent it entirely.
 
 ## Firewall Configuration
 
@@ -132,6 +134,7 @@ These are consumed by `run-claude.sh` itself:
 - `--isolate-claude-data` — Use isolated Docker volume instead of read-only host mount + tmpfs (required for Docker Desktop)
 - `--no-sync-back` — Disable sync-back of session data to host on clean exit
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
+- `--allow-git-push` — Enable `git push` from inside the container (blocked by default for security)
 - `--reload-firewall` — Reload `firewall-allowlist.conf` in all running containers
 
 ### Passing arguments to Claude Code
@@ -150,15 +153,24 @@ The first argument that is an existing directory becomes the project dir. All ot
 
 ### Git push from the container
 
-If the GitHub CLI (`gh`) is authenticated on your host, the sandbox automatically extracts your GitHub token and configures `git credential-cache` inside the container. This enables `git push` over HTTPS without any manual setup.
+**`git push` is blocked by default** to prevent data exfiltration through the project repo. To enable it, pass `--allow-git-push`:
 
-The token **never touches disk** — it lives only in the credential-cache daemon's memory. The cache socket resides on `/tmp` (tmpfs), which is ephemeral and gone when the container exits. The `GITHUB_TOKEN` env var is overwritten with random data and unset before Claude Code starts.
+```bash
+./run-claude.sh --allow-git-push ~/Projects/my-project
+```
+
+When enabled, the sandbox extracts your GitHub token from the host's `gh` CLI and configures `git credential-cache` inside the container. The token **never touches disk** — it lives only in the credential-cache daemon's memory. The cache socket resides on `/tmp` (tmpfs), gone when the container exits. The `GITHUB_TOKEN` env var is overwritten with random data and unset before Claude Code starts.
+
+Additionally, `git remote add/set-url/rename` is always blocked (prevents adding exfiltration targets), and dangerous `git config` keys (`core.fsmonitor`, `core.sshCommand`, `filter.*`, `credential.helper`, etc.) are blocked.
+
+**Token scope warning:** If using a broad-scope GitHub token (classic PAT or OAuth), the launcher logs a warning. Consider creating a [fine-grained PAT](https://github.com/settings/personal-access-tokens) scoped to only the target repository.
 
 Requirements:
 - `gh` CLI installed on host
 - Authenticated via `gh auth login`
+- `--allow-git-push` flag passed to `run-claude.sh`
 
-If `gh` is not installed or not authenticated, the container starts normally — git push just won't have credentials pre-configured.
+If `gh` is not installed or not authenticated, the container starts normally — git operations other than push work without credentials.
 
 ### Shell alias
 
@@ -195,7 +207,7 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild ~/Projects/my-projec
 │  │  │                                          │  │  │
 │  │  │  Mounts:                                 │  │  │
 │  │  │   /workspace ← project dir (rw)          │  │  │
-│  │  │   ~/.claude-host ← host ~/.claude (ro)   │  │  │
+│  │  │   /mnt/.claude-host ← host ~/.claude (ro, root-only) │  │  │
 │  │  │   ~/.claude ← tmpfs (rw, 512m)          │  │  │
 │  │  │   /tmp ← tmpfs (noexec, 512m)           │  │  │
 │  │  │                                          │  │  │

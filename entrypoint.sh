@@ -16,7 +16,7 @@ log() {
 # When ~/.claude-host exists (read-only host mount), copy needed data into the
 # writable tmpfs at ~/.claude. This runs BEFORE the log file is opened so that
 # any host entrypoint.log doesn't conflict.
-HOST_CLAUDE="/home/claude/.claude-host"
+HOST_CLAUDE="/mnt/.claude-host"
 CLAUDE_DIR="/home/claude/.claude"
 
 if [ -d "$HOST_CLAUDE" ]; then
@@ -78,8 +78,10 @@ sync_back_on_exit() {
         local STAGING="$SYNC_DIR/data"
         mkdir -p "$STAGING"
 
-        # Copy everything that changed, EXCLUDING blocked and transient files
-        rsync -a \
+        # Copy everything that changed, EXCLUDING blocked and transient files.
+        # --safe-links skips symlinks pointing outside the source tree to prevent
+        # symlink planting attacks (e.g. ~/.claude/evil -> /etc/passwd on host).
+        rsync -a --safe-links \
             --exclude='settings.json' \
             --exclude='settings.local.json' \
             --exclude='CLAUDE.md' \

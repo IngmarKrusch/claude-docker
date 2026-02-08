@@ -35,6 +35,9 @@ Options:
                           the standard runc runtime is used, which is best for
                           OrbStack. Note: the iptables firewall does not work
                           with gVisor's virtualized network stack.
+  --allow-git-push        Enable git push from inside the container (blocked
+                          by default for security). Consider using a fine-grained
+                          GitHub PAT scoped to the target repo.
   --reload-firewall       Reload the firewall allowlist in all running
                           claude-sandbox containers. Edit firewall-allowlist.conf
                           then run this to apply changes without restarting.
@@ -73,7 +76,7 @@ Argument routing:
   to claude as CLAUDE_ARGS.
 
   Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --no-sync-back,
-                 --with-gvisor, --reload-firewall
+                 --with-gvisor, --reload-firewall, --allow-git-push
   Claude flags:  --continue, --resume, -p, --allowedTools, --model, etc.
 
 Examples:
@@ -97,6 +100,7 @@ ISOLATE_DATA=false
 SYNC_BACK=true
 WITH_GVISOR=false
 RELOAD_FIREWALL=false
+ALLOW_GIT_PUSH=false
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -107,6 +111,7 @@ for arg in "$@"; do
         --no-sync-back) SYNC_BACK=false ;;
         --with-gvisor) WITH_GVISOR=true ;;
         --reload-firewall) RELOAD_FIREWALL=true ;;
+        --allow-git-push) ALLOW_GIT_PUSH=true ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -189,7 +194,11 @@ fi
 # Extract GitHub token from host (for git push inside container)
 GH_TOKEN=$(gh auth token 2>/dev/null || true)
 if [ -n "$GH_TOKEN" ]; then
-    log "[sandbox] GitHub token found"
+    case "$GH_TOKEN" in
+        github_pat_*) log "[sandbox] Fine-grained GitHub token (good)" ;;
+        gho_*|ghp_*) log "[sandbox] WARNING: Broad-scope GitHub token. Consider a fine-grained PAT scoped to this repo." ;;
+        *) log "[sandbox] GitHub token found" ;;
+    esac
 fi
 
 LATEST_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest"
@@ -262,6 +271,12 @@ if [ -n "$GH_TOKEN" ]; then
     GH_TOKEN_FLAG="-e GITHUB_TOKEN=$GH_TOKEN"
 fi
 
+GIT_PUSH_FLAG=""
+if [ "$ALLOW_GIT_PUSH" = true ]; then
+    GIT_PUSH_FLAG="-e ALLOW_GIT_PUSH=1"
+    log "[sandbox] Git push enabled (--allow-git-push)"
+fi
+
 # Determine Claude data mount strategy
 CLAUDE_MOUNT_FLAGS=""
 SYNC_BACK_FLAGS=""
@@ -278,7 +293,7 @@ else
     fi
 
     # Read-only host mount at alternate path + writable tmpfs at real path
-    CLAUDE_MOUNT_FLAGS="-v $HOME/.claude:/home/claude/.claude-host:ro --tmpfs /home/claude/.claude:rw,nosuid,size=512m"
+    CLAUDE_MOUNT_FLAGS="-v $HOME/.claude:/mnt/.claude-host:ro --tmpfs /home/claude/.claude:rw,nosuid,size=512m"
     log "[sandbox] Mounting ~/.claude read-only (writes go to tmpfs)"
 
     # Set up sync-back staging directory
@@ -317,6 +332,7 @@ docker run --rm -it \
     -e CLAUDE_CREDENTIALS="$CREDS" \
     $FORCE_CREDS_FLAG \
     $GH_TOKEN_FLAG \
+    $GIT_PUSH_FLAG \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
@@ -330,14 +346,16 @@ DOCKER_EXIT=$?
 set -e
 
 if [ -f "$ENTRYPOINT_LOG" ] && [ -s "$ENTRYPOINT_LOG" ]; then
-    LAUNCH_LOG+="$(cat "$ENTRYPOINT_LOG")"$'\n'
+    # Strip ANSI escape sequences to prevent terminal injection from container output.
+    # Removes CSI sequences (ESC[...X), OSC sequences (ESC]...BEL), and bare escapes.
+    LAUNCH_LOG+="$(LC_ALL=C sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[^[]\{0,2\}//g' "$ENTRYPOINT_LOG")"$'\n'
 fi
 rm -f "$ENTRYPOINT_LOG" 2>/dev/null || true
 
 # Sync-back: merge staged data into host ~/.claude/
 if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
     echo "[sandbox] Syncing session data back to host..."
-    rsync -a \
+    rsync -a --safe-links \
         --exclude='settings.json' \
         --exclude='settings.local.json' \
         --exclude='CLAUDE.md' \
