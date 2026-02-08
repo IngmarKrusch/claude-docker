@@ -170,12 +170,15 @@ if [ -f /tmp/host-gitconfig ]; then
     chmod 644 "$GITCONFIG"
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" git config --global --add safe.directory /workspace
     # Strip host credential helpers (e.g. macOS GCM) that don't exist in the container
+    # Use wrapped-git directly: these keys are intentionally blocked by the git
+    # wrapper to prevent Claude from overriding them, but the entrypoint is trusted
+    # init code that needs to set the baseline values.
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
-        git config --global --unset-all credential.helper 2>/dev/null || true
+        /usr/libexec/wrapped-git config --global --unset-all credential.helper 2>/dev/null || true
     # Neutralise hooks from the mounted workspace — a compromised session must not
     # be able to plant hooks that execute on the host (or in future containers).
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
-        git config --global core.hooksPath /dev/null
+        /usr/libexec/wrapped-git config --global core.hooksPath /dev/null
     log "[sandbox] Git configured"
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
@@ -198,9 +201,9 @@ if [ -n "$GITHUB_TOKEN" ]; then
     chmod 700 "$(dirname "$CACHE_SOCK")"
     chown claude: "$(dirname "$CACHE_SOCK")"
 
-    # Configure git to use the in-memory credential cache
+    # Configure git to use the in-memory credential cache (bypass wrapper — blocked key)
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
-        git config --global credential.helper "cache --timeout=86400 --socket=$CACHE_SOCK"
+        /usr/libexec/wrapped-git config --global credential.helper "cache --timeout=86400 --socket=$CACHE_SOCK"
 
     # Scope the token to the workspace repo only.
     # With useHttpPath=true, git includes the repo path in credential lookups,

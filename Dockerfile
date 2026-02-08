@@ -59,6 +59,7 @@ RUN mkdir -p /usr/local/lib \
 # Real binary moved to /usr/libexec/wrapped-git (NOT git-* to avoid git's
 # argv[0] subcommand detection treating the basename as a builtin command).
 # Rootfs is read-only so wrapper can't be modified at runtime.
+# hadolint ignore=SC1003
 RUN printf '#!/bin/sh\n\
 # Block dangerous git operations\n\
 case "$1" in\n\
@@ -89,7 +90,7 @@ case "$1" in\n\
     case "$_key" in\n\
       core.fsmonitor|core.sshCommand|core.pager|core.editor|core.hooksPath|\\\n\
       diff.*.textconv|filter.*|credential.helper)\n\
-        echo "error: setting '\\''$_key'\\'' is blocked in the sandbox" >&2\n\
+        echo "error: setting \047$_key\047 is blocked in the sandbox" >&2\n\
         exit 1\n\
         ;;\n\
     esac\n\
