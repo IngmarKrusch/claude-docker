@@ -27,6 +27,9 @@ if [ -d "$HOST_CLAUDE" ]; then
     cp "$HOST_CLAUDE/settings.json" "$CLAUDE_DIR/" 2>/dev/null || true
     cp "$HOST_CLAUDE/settings.local.json" "$CLAUDE_DIR/" 2>/dev/null || true
 
+    # 2b. Status line script (referenced by settings.json statusLine command)
+    cp "$HOST_CLAUDE/statusline-command.sh" "$CLAUDE_DIR/" 2>/dev/null || true
+
     # 3. User-level CLAUDE.md (project context, memory)
     cp "$HOST_CLAUDE/CLAUDE.md" "$CLAUDE_DIR/" 2>/dev/null || true
 
@@ -84,6 +87,7 @@ sync_back_on_exit() {
         rsync -a --safe-links \
             --exclude='settings.json' \
             --exclude='settings.local.json' \
+            --exclude='statusline-command.sh' \
             --exclude='CLAUDE.md' \
             --exclude='.credentials.json' \
             --exclude='.gitconfig' \
