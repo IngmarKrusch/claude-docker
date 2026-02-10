@@ -95,8 +95,9 @@ iptables -P OUTPUT DROP
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Allow outbound SSH only to allowlisted destinations (prevents tunneling to arbitrary servers)
-iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
+# Block outbound SSH — this repo uses HTTPS for GitHub, and SSH port 22 is a
+# data exfiltration channel (raw TCP accepted by github.com:22 without auth).
+iptables -A OUTPUT -p tcp --dport 22 -j DROP
 # Allow other outbound traffic to allowed domains (HTTPS, etc.)
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 
