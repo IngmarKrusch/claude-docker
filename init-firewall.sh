@@ -44,8 +44,8 @@ _log "DNS resolver detected as: $DNS_RESOLVER"
 # resolver forwards all queries — enabling data exfiltration via subdomain
 # encoding (~50 bytes/query). These rules reduce tunneling throughput:
 # - Drop oversized UDP DNS packets (>256 bytes — normal queries are <128 bytes)
-# - Rate-limit claude user to 2/sec sustained, burst 5 (sufficient for npm/git/curl)
-# - At 2 queries/sec × ~50 bytes payload, tunneling drops to ~100 B/s
+# - Rate-limit claude user to 1/sec sustained, burst 2 (sufficient for npm/git/curl)
+# - At 1 query/sec × ~50 bytes payload, tunneling drops to ~50 B/s
 # - Root/system processes are unrestricted (needed during init for domain resolution
 #   and firewall verification; root only runs during entrypoint, before privilege drop)
 CLAUDE_UID=$(id -u claude)
@@ -54,8 +54,8 @@ iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m length --length 257:6
 iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 # Rate-limited DNS for claude user (anti-tunneling)
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 2/sec --limit-burst 5 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 2/sec --limit-burst 5 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
 # Block DNS to ALL other destinations (must come before general allowlist rules)
 iptables -A OUTPUT -p udp --dport 53 -j DROP
 iptables -A OUTPUT -p tcp --dport 53 -j DROP

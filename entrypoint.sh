@@ -82,9 +82,11 @@ sync_back_on_exit() {
         mkdir -p "$STAGING"
 
         # Copy everything that changed, EXCLUDING blocked and transient files.
-        # --safe-links skips symlinks pointing outside the source tree to prevent
-        # symlink planting attacks (e.g. ~/.claude/evil -> /etc/passwd on host).
-        rsync -a --safe-links \
+        # --no-links skips ALL symlinks to prevent symlink planting attacks
+        # (e.g. ~/.claude/evil -> /etc/passwd on host). --safe-links only blocked
+        # absolute symlinks, but relative symlinks like ../../../etc/passwd could
+        # still escape. --no-links is the strictest option.
+        rsync -a --no-links \
             --exclude='settings.json' \
             --exclude='settings.local.json' \
             --exclude='statusline-command.sh' \
@@ -191,12 +193,9 @@ export GIT_CONFIG_GLOBAL="$GITCONFIG"
 # at /usr/local/bin/git, which force-sets GIT_CONFIG_COUNT on every invocation.
 # The global gitconfig settings above serve as defense-in-depth only.
 
-# Enable LD_PRELOAD for nodump.so BEFORE spawning the credential cache daemon.
-# nodump.so calls prctl(PR_SET_DUMPABLE, 0) in a constructor, making every
-# dynamically-linked process non-dumpable (/proc/<pid>/mem inaccessible to
-# same-UID processes). This protects the credential daemon, claude, and all
-# child processes from /proc memory reading/writing attacks.
-export LD_PRELOAD=/usr/local/lib/nodump.so
+# nodump.so and git-guard.so are loaded via /etc/ld.so.preload (read-only rootfs),
+# which is kernel-enforced and cannot be bypassed by environment manipulation.
+# No LD_PRELOAD export needed — /etc/ld.so.preload handles both libraries.
 
 # Configure GitHub credentials for git push (in-memory only, never written to disk)
 if [ -n "$GITHUB_TOKEN" ]; then
@@ -265,6 +264,12 @@ export PATH="/home/claude/.local/bin:$PATH"
 
 # Disable core dumps to prevent secrets leaking via crash dumps to /workspace
 ulimit -c 0
+
+# Disable error reporting — sentry.io is removed from the firewall allowlist
+# because it accepts arbitrary POST data (exfiltration channel). This env var
+# ensures Claude Code doesn't attempt to send error reports even if the allowlist
+# is accidentally widened in the future.
+export DISABLE_ERROR_REPORTING=1
 
 # Drop privileges and clear the bounding set in a single setpriv call.
 # We can't exec gosu after clearing the bounding set because gosu needs

@@ -45,16 +45,16 @@ Options:
 Security layers:
   Read-only rootfs, custom seccomp allowlist (ptrace blocked), all capabilities
   dropped (except CHOWN/SETUID/SETGID/SETPCAP/NET_ADMIN/NET_RAW — bounding set
-  cleared after init), iptables firewall (allowlist-only, DNS pinned to internal resolver),
+  cleared after init), iptables firewall (allowlist-only, DNS rate-limited),
   no-new-privileges, resource limits (memory/pids), no setuid binaries, privileged
   port binding blocked, --init (tini as PID 1, root-owned /proc/1/mem),
-  drop-dumpable wrapper (PR_SET_DUMPABLE=0 prevents /proc/<pid>/mem access),
-  core dumps disabled (ulimit -c 0), git wrapper at all entry points
-  (/usr/bin/git, /usr/lib/git-core/git) enforcing hooksPath=/dev/null and
-  credential.helper (immune to local config override), GitHub token scoped
-  to workspace repo only, privilege drop to UID 501 via setpriv, and
+  nodump.so + git-guard.so via /etc/ld.so.preload (kernel-enforced, read-only
+  rootfs), core dumps disabled (ulimit -c 0), git wrapper + binary-level guard
+  (calling wrapped-git directly cannot bypass restrictions), hooksPath=/dev/null
+  and credential.helper forced on every git invocation, GitHub token scoped
+  to workspace repo only, privilege drop to UID 501 via setpriv,
   ~/.claude mount isolation (read-only host mount + writable tmpfs, settings.json
-  and user-level CLAUDE.md never synced back to host).
+  and user-level CLAUDE.md never synced back to host), post-exit workspace audit.
 
 Runtime compatibility:
   OrbStack (recommended):
@@ -355,7 +355,7 @@ rm -f "$ENTRYPOINT_LOG" 2>/dev/null || true
 # Sync-back: merge staged data into host ~/.claude/
 if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
     echo "[sandbox] Syncing session data back to host..."
-    rsync -a --safe-links \
+    rsync -a --no-links \
         --exclude='settings.json' \
         --exclude='settings.local.json' \
         --exclude='CLAUDE.md' \
@@ -364,6 +364,29 @@ if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
 fi
 # Clean up sync staging directory
 rm -rf "$HOME/.claude/.sync-back" 2>/dev/null || true
+
+# Post-exit workspace audit: warn if the session planted files that could execute
+# code on the host outside the sandbox (persistence via workspace write-back).
+AUDIT_WARNINGS=""
+for suspect in \
+    "$PROJECT_DIR/.envrc" \
+    "$PROJECT_DIR/.vscode/settings.json" \
+    "$PROJECT_DIR/.vscode/tasks.json" \
+    "$PROJECT_DIR/Makefile" \
+    "$PROJECT_DIR/.gitattributes" \
+    "$PROJECT_DIR/.github/workflows" \
+    "$PROJECT_DIR/.git/hooks"; do
+    if [ -e "$suspect" ]; then
+        AUDIT_WARNINGS+="  - $suspect"$'\n'
+    fi
+done
+if [ -n "$AUDIT_WARNINGS" ]; then
+    echo ""
+    echo "[sandbox] WARNING: The following workspace files can execute code outside the sandbox."
+    echo "[sandbox] Review these for unexpected changes before running build/IDE tools:"
+    printf '%s' "$AUDIT_WARNINGS"
+    echo "[sandbox] Use 'git diff' to inspect changes made during this session."
+fi
 
 if [ -n "$LAUNCH_LOG" ]; then
     echo ""

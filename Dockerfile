@@ -54,6 +54,22 @@ RUN mkdir -p /usr/local/lib \
     && rm /tmp/nodump.c \
     && chmod 755 /usr/local/lib/nodump.so
 
+# Compile git-guard.so — LD_PRELOAD library enforcing git operation restrictions.
+# Loaded via /etc/ld.so.preload (read-only rootfs — cannot be removed at runtime).
+# Detects when the current process is wrapped-git and enforces: push blocking,
+# remote modification blocking, dangerous config key blocking, and forced
+# GIT_CONFIG_COUNT overrides. Root (UID 0) is exempt for entrypoint init.
+# This is the PRIMARY enforcement layer — the shell wrapper is belt-and-suspenders.
+COPY git-guard.c /tmp/git-guard.c
+RUN gcc -shared -fPIC -O2 -o /usr/local/lib/git-guard.so /tmp/git-guard.c \
+    && rm /tmp/git-guard.c \
+    && chmod 755 /usr/local/lib/git-guard.so
+
+# Install both guard libraries via /etc/ld.so.preload (kernel-enforced, cannot be
+# bypassed by LD_PRELOAD overrides or environment manipulation on read-only rootfs).
+# This ensures git-guard.so and nodump.so load into EVERY dynamically-linked process.
+RUN printf '/usr/local/lib/git-guard.so\n/usr/local/lib/nodump.so\n' > /etc/ld.so.preload
+
 # Git wrapper: replace ALL git entry points so /usr/bin/git can't bypass the wrapper.
 # Force hooksPath=/dev/null and credential.helper on every invocation.
 # Real binary moved to /usr/libexec/wrapped-git (NOT git-* to avoid git's

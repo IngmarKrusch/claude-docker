@@ -36,10 +36,10 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 | Layer | Protection |
 |-------|-----------|
 | **Filesystem** | Read-only rootfs. `/workspace` is writable. `~/.claude` is a writable tmpfs populated from a read-only host mount (`/mnt/.claude-host`, root-only) at startup — container writes never reach the host directly. `/tmp` is a noexec tmpfs. |
-| **Git operations** | `git push` blocked by default (opt in with `--allow-git-push`). `git remote add/set-url/rename` blocked. Dangerous `git config` keys blocked (`core.fsmonitor`, `core.sshCommand`, `filter.*`, etc.). Hook execution neutralized via `hooksPath=/dev/null`. |
+| **Git operations** | `git push` blocked by default (opt in with `--allow-git-push`). `git remote add/set-url/rename` blocked. Dangerous `git config` keys blocked (`core.fsmonitor`, `core.sshCommand`, `filter.*`, etc.). Hook execution neutralized via `hooksPath=/dev/null`. **Enforced at binary level** via `git-guard.so` (`/etc/ld.so.preload`) — calling `/usr/libexec/wrapped-git` directly cannot bypass restrictions. |
 | **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret, and other high-risk syscalls. |
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID/SETPCAP (entrypoint setup) and NET_ADMIN/NET_RAW (firewall). Bounding set cleared after init. |
-| **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. |
+| **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. DNS rate-limited to 1 query/sec (burst 2) to mitigate tunneling exfiltration (~50 B/s max). `sentry.io` removed from allowlist (accepts arbitrary POST data). Error reporting disabled via `DISABLE_ERROR_REPORTING=1`. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `setpriv` with empty bounding set. No `sudo` in image. `no-new-privileges` prevents escalation. |
 | **Credentials** | OAuth tokens written to file inside container (tmpfs); env var cleared before exec. Tokens never persist to host. GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
@@ -62,7 +62,7 @@ The host's `~/.claude/` is mounted **read-only** at `/mnt/.claude-host` (a root-
 | **Plugin injection** — modify host plugins for persistent compromise | Writes go to tmpfs; lost on exit (plugins do sync back by default) |
 | **Cross-project data leakage** — read other projects' memories, sessions, history | Host mount at root-only path (`/mnt/.claude-host`), inaccessible after init; only current project data copied |
 
-**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Sync-back uses `rsync --safe-links` to prevent symlink planting attacks (symlinks pointing outside the source tree are silently skipped). Two files are **never** synced back regardless of settings:
+**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Sync-back uses `rsync --no-links` to prevent symlink planting attacks (all symlinks are silently skipped — both absolute and relative). Two files are **never** synced back regardless of settings:
 
 - `settings.json` / `settings.local.json` — prevents tool auto-approval escalation
 - `CLAUDE.md` (user-level) — prevents persistent prompt injection
@@ -77,7 +77,8 @@ Some attack surfaces are intentionally left open because closing them would brea
 
 - **`~/.npm` tmpfs requires `exec`** — npx downloads and runs binaries from `~/.npm/_npx/` (e.g. MCP servers). Using `noexec` on this mount (commit `60ca5b1`) broke MCP servers; commit `666c2bc` restored `exec`. The firewall allowlist limits what can be downloaded and executed.
 - **npm postinstall scripts** — `npm install` runs arbitrary postinstall scripts. Blocking via `--ignore-scripts` would break MCP servers that rely on npx. Mitigated by the firewall allowlist restricting network access.
-- **History readable** — The container receives host `history.jsonl` (needed for `--continue`). DNS rate-limiting (~100 B/s) makes exfiltration impractical but does not prevent it entirely.
+- **History readable** — The container receives host `history.jsonl` (needed for `--continue`). DNS rate-limiting (~50 B/s) makes exfiltration impractical but does not prevent it entirely.
+- **Workspace write-back** — `/workspace` is writable (required for code editing). A compromised session could plant files (`.envrc`, `Makefile`, `.vscode/tasks.json`) that execute when the host opens the project. Post-exit audit warnings are displayed for known dangerous files.
 
 ## Firewall Configuration
 
@@ -92,7 +93,6 @@ The container's outbound network allowlist is defined in `firewall-allowlist.con
 @github
 api.anthropic.com
 registry.npmjs.org
-sentry.io
 ```
 
 ### Adding or removing domains
@@ -338,10 +338,13 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 
 - **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, `setpriv` for privilege drop
 - **entrypoint.sh** — Mount isolation (host state copy), firewall init, credential setup, gitconfig, sync-back trap, privilege drop
-- **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch, post-exit sync-back merge
-- **init-firewall.sh** — iptables chain setup, calls `reload-firewall.sh`, connectivity verification
+- **run-claude.sh** — Host launcher: keychain extraction, image build, hardened container launch, post-exit workspace audit, sync-back merge
+- **init-firewall.sh** — iptables chain setup, DNS rate limiting, calls `reload-firewall.sh`, connectivity verification
 - **reload-firewall.sh** — Reads `firewall-allowlist.conf`, resolves domains, atomic ipset swap
 - **firewall-allowlist.conf** — Configurable domain allowlist for the container firewall
 - **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus high-risk syscalls)
+- **git-guard.c** — LD_PRELOAD library enforcing git restrictions at binary level (compiled into `git-guard.so`, loaded via `/etc/ld.so.preload`)
+- **nodump.c** — LD_PRELOAD library setting PR_SET_DUMPABLE=0 (prevents `/proc/<pid>/mem` access)
+- **drop-dumpable.c** — Static wrapper setting dumpable=0 before exec (defense-in-depth for statically-linked binaries)
 - **lint.sh** — Runs Hadolint on Dockerfile via Docker
 - **.githooks/pre-commit** — Runs lint on commit; enable with `git config core.hooksPath .githooks`
