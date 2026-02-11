@@ -103,6 +103,14 @@ if [ "${SYNC_BACK:-}" = "1" ]; then
     trap sync_back_on_exit EXIT
 fi
 
+# Create push flag file (root-owned, immutable after privilege drop)
+mkdir -p /run/sandbox-flags && chmod 755 /run/sandbox-flags
+if [ "${ALLOW_GIT_PUSH:-}" = "1" ]; then
+    touch /run/sandbox-flags/allow-git-push
+    chmod 444 /run/sandbox-flags/allow-git-push
+fi
+unset ALLOW_GIT_PUSH
+
 # Initialize firewall if NET_ADMIN capability is available
 if /usr/local/bin/init-firewall.sh 2>/dev/null; then
     log "[sandbox] Firewall initialized"
@@ -188,6 +196,29 @@ if [ -f /tmp/host-gitconfig ]; then
     log "[sandbox] Git configured"
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
+
+# Sanitize workspace .git/config: strip dangerous keys that could execute code
+# on the host after container exit. Use wrapped-git directly (root is exempt
+# from git-guard) with -f to target only the repo-local config.
+if [ -f /workspace/.git/config ]; then
+    for key in core.fsmonitor core.sshCommand include.path; do
+        /usr/libexec/wrapped-git config -f /workspace/.git/config --unset-all "$key" 2>/dev/null || true
+    done
+    /usr/libexec/wrapped-git config -f /workspace/.git/config --remove-section alias 2>/dev/null || true
+    /usr/libexec/wrapped-git config -f /workspace/.git/config --remove-section include 2>/dev/null || true
+    # Remove all [includeIf "..."] sections. git stores these with quoted subsections
+    # (e.g., [includeIf "gitdir:/path/"]) so --remove-section includeIf silently fails
+    # (no bare [includeIf] section exists). Use awk to strip them from the raw file.
+    if grep -q '^\[includeIf ' /workspace/.git/config 2>/dev/null; then
+        _tmp=$(mktemp)
+        awk '/^\[includeIf /{ skip=1; next } /^\[/{ skip=0 } !skip{ print }' \
+            /workspace/.git/config > "$_tmp" && cat "$_tmp" > /workspace/.git/config
+        rm -f "$_tmp"
+    fi
+    # Write post-sanitization hash so the host can compare against a clean baseline
+    # (not the pre-sanitization snapshot). Written next to the entrypoint log mount.
+    sha256sum /workspace/.git/config 2>/dev/null | cut -d' ' -f1 > /run/git-config-hash || true
+fi
 
 # Note: core.hooksPath and credential.helper are enforced by the git wrapper
 # at /usr/local/bin/git, which force-sets GIT_CONFIG_COUNT on every invocation.

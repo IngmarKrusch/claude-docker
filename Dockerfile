@@ -75,50 +75,11 @@ RUN printf '/usr/local/lib/git-guard.so\n/usr/local/lib/nodump.so\n' > /etc/ld.s
 # Real binary moved to /usr/libexec/wrapped-git (NOT git-* to avoid git's
 # argv[0] subcommand detection treating the basename as a builtin command).
 # Rootfs is read-only so wrapper can't be modified at runtime.
-# hadolint ignore=SC1003,SC2016
-RUN printf '#!/bin/sh\n\
-# Block dangerous git operations\n\
-case "$1" in\n\
-  push)\n\
-    if [ "${ALLOW_GIT_PUSH:-}" != "1" ]; then\n\
-      echo "error: git push is disabled in the sandbox (use --allow-git-push to enable)" >&2\n\
-      exit 1\n\
-    fi\n\
-    ;;\n\
-  remote)\n\
-    case "${2:-}" in\n\
-      add|set-url|rename)\n\
-        echo "error: git remote modification is disabled in the sandbox" >&2\n\
-        exit 1\n\
-        ;;\n\
-    esac\n\
-    ;;\n\
-  config)\n\
-    _skip=1\n\
-    _key=""\n\
-    for _a in "$@"; do\n\
-      if [ "$_skip" = 1 ]; then _skip=0; continue; fi\n\
-      case "$_a" in\n\
-        -*) ;;\n\
-        *) _key="$_a"; break ;;\n\
-      esac\n\
-    done\n\
-    case "$_key" in\n\
-      core.fsmonitor|core.sshCommand|core.pager|core.editor|core.hooksPath|\\\n\
-      diff.*.textconv|filter.*|credential.helper)\n\
-        echo "error: setting \047$_key\047 is blocked in the sandbox" >&2\n\
-        exit 1\n\
-        ;;\n\
-    esac\n\
-    ;;\n\
-esac\n\
-export GIT_CONFIG_COUNT=2\n\
-export GIT_CONFIG_KEY_0=core.hooksPath\n\
-export GIT_CONFIG_VALUE_0=/dev/null\n\
-export GIT_CONFIG_KEY_1=credential.helper\n\
-export GIT_CONFIG_VALUE_1="cache --timeout=86400 --socket=/tmp/.git-credential-cache/sock"\n\
-exec /usr/libexec/wrapped-git "$@"\n' > /usr/local/bin/git \
-    && chmod +x /usr/local/bin/git \
+# Scans -c/--config-env for blocked keys (C1 fix), uses case-insensitive
+# matching (H1), handles --file/-f flags (H2), and skips global flags to
+# find the real subcommand (H4).
+COPY git-wrapper.sh /usr/local/bin/git
+RUN chmod +x /usr/local/bin/git \
     && mkdir -p /usr/libexec \
     && mv /usr/bin/git /usr/libexec/wrapped-git \
     && cp /usr/local/bin/git /usr/bin/git \

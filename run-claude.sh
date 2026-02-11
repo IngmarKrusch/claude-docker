@@ -347,7 +347,6 @@ docker run --rm -it \
     --tmpfs /home/claude/.npm:rw,noexec,nosuid,size=256m \
     --env-file "$ENVFILE" \
     --shm-size=64m \
-    -v /dev/null:/proc/kallsyms:ro \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \

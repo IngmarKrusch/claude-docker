@@ -43,19 +43,19 @@ _log "DNS resolver detected as: $DNS_RESOLVER"
 # DNS is pinned to the internal resolver (no direct external DNS), but the
 # resolver forwards all queries — enabling data exfiltration via subdomain
 # encoding (~50 bytes/query). These rules reduce tunneling throughput:
-# - Drop oversized UDP DNS packets (>256 bytes — normal queries are <128 bytes)
-# - Rate-limit claude user to 1/sec sustained, burst 2 (sufficient for npm/git/curl)
-# - At 1 query/sec × ~50 bytes payload, tunneling drops to ~50 B/s
+# - Drop oversized UDP DNS packets (>192 bytes — normal queries are <128 bytes)
+# - Rate-limit claude user to 1/sec sustained, burst 5 (sufficient for npm/git/curl)
+# - At 1 query/sec × ~50 bytes payload, tunneling drops to ~25 B/s
 # - Root/system processes are unrestricted (needed during init for domain resolution
 #   and firewall verification; root only runs during entrypoint, before privilege drop)
 CLAUDE_UID=$(id -u claude)
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m length --length 257:65535 -j DROP
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m length --length 193:65535 -j DROP
 # Unrestricted DNS for root/system processes (init, firewall setup, verification)
 iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 # Rate-limited DNS for claude user (anti-tunneling)
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 5 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 5 -j ACCEPT
 # Block DNS to ALL other destinations (must come before general allowlist rules)
 iptables -A OUTPUT -p udp --dport 53 -j DROP
 iptables -A OUTPUT -p tcp --dport 53 -j DROP
@@ -119,4 +119,10 @@ if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
     exit 1
 else
     _log "Firewall verification passed - able to reach https://api.github.com as expected"
+fi
+
+# Verify firewall rules work for the claude user (not just root, which is exempt
+# from DNS rate limiting and packet size limits) (M5 fix)
+if ! gosu claude curl --connect-timeout 10 https://api.github.com/zen >/dev/null 2>&1; then
+    _log "WARNING: Claude user cannot reach GitHub API - DNS rate limit may be too aggressive"
 fi
