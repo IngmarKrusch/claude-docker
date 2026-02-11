@@ -258,22 +258,20 @@ if [ "$WITH_GVISOR" = true ]; then
     fi
 fi
 
-# Run container with credentials passed via environment variable.
+# Pass credentials via --env-file to avoid exposure in 'ps aux' output (M1 fix).
 # The entrypoint writes them to ~/.claude/.credentials.json and unsets the var
 # before exec'ing Claude Code, so the credentials are not visible to child processes.
-FORCE_CREDS_FLAG=""
+ENVFILE=$(mktemp)
+chmod 600 "$ENVFILE"
+printf 'CLAUDE_CREDENTIALS=%s\n' "$CREDS" >> "$ENVFILE"
 if [ "$FRESH_CREDS" = true ]; then
-    FORCE_CREDS_FLAG="-e FORCE_CREDENTIALS=1"
+    echo "FORCE_CREDENTIALS=1" >> "$ENVFILE"
 fi
-
-GH_TOKEN_FLAG=""
 if [ -n "$GH_TOKEN" ]; then
-    GH_TOKEN_FLAG="-e GITHUB_TOKEN=$GH_TOKEN"
+    printf 'GITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$ENVFILE"
 fi
-
-GIT_PUSH_FLAG=""
 if [ "$ALLOW_GIT_PUSH" = true ]; then
-    GIT_PUSH_FLAG="-e ALLOW_GIT_PUSH=1"
+    echo "ALLOW_GIT_PUSH=1" >> "$ENVFILE"
     log "[sandbox] Git push enabled (--allow-git-push)"
 fi
 
@@ -305,7 +303,25 @@ else
     fi
 fi
 
+# Snapshot .git/config and hooks listing for post-exit tamper detection
+GIT_CONFIG_BACKUP=$(mktemp)
+cp "$PROJECT_DIR/.git/config" "$GIT_CONFIG_BACKUP" 2>/dev/null || true
+# Pre-session hash used as fallback if entrypoint hash isn't available
+GIT_CONFIG_HASH_PRE=$(shasum -a 256 "$PROJECT_DIR/.git/config" 2>/dev/null | cut -d' ' -f1)
+# The entrypoint sanitizes .git/config (strips dangerous keys) which changes
+# the hash. It writes the post-sanitization hash to GIT_CONFIG_HASH_FILE so
+# we compare against the clean baseline, not the pre-sanitization state.
+GIT_CONFIG_HASH_FILE=$(mktemp)
+HOOKS_LISTING=$(ls -la "$PROJECT_DIR/.git/hooks/" 2>/dev/null || true)
+
 ENTRYPOINT_LOG=$(mktemp)
+
+# L1 fix: clean up all tempfiles on signal/early-exit
+_cleanup_temps() { rm -f "$GIT_CONFIG_BACKUP" "$GIT_CONFIG_HASH_FILE" "$ENTRYPOINT_LOG" "$ENVFILE" 2>/dev/null; }
+trap _cleanup_temps EXIT
+
+# Delete env file shortly after docker reads it (minimizes on-disk exposure)
+(sleep 2 && rm -f "$ENVFILE") &
 
 set +e
 # shellcheck disable=SC2086
@@ -329,16 +345,16 @@ docker run --rm -it \
     --tmpfs /tmp:rw,noexec,nosuid,size=512m \
     --tmpfs /home/claude/.config:rw,nosuid,size=64m \
     --tmpfs /home/claude/.npm:rw,noexec,nosuid,size=256m \
-    -e CLAUDE_CREDENTIALS="$CREDS" \
-    $FORCE_CREDS_FLAG \
-    $GH_TOKEN_FLAG \
-    $GIT_PUSH_FLAG \
+    --env-file "$ENVFILE" \
+    --shm-size=64m \
+    -v /dev/null:/proc/kallsyms:ro \
     -v "$PROJECT_DIR":/workspace \
     -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     $CLAUDE_MOUNT_FLAGS \
     $SYNC_BACK_FLAGS \
     -v "$ENTRYPOINT_LOG":/run/entrypoint.log \
+    -v "$GIT_CONFIG_HASH_FILE":/run/git-config-hash \
     -e ENTRYPOINT_LOG=/run/entrypoint.log \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
@@ -361,12 +377,105 @@ if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
         --exclude='CLAUDE.md' \
         "$HOME/.claude/.sync-back/data/" "$HOME/.claude/"
     echo "[sandbox] Sync complete"
+
+    # Warn about synced project-level CLAUDE.md and memory files
+    if [ -d "$HOME/.claude/.sync-back/data/projects" ]; then
+        CLAUDE_MD_COUNT=$(find "$HOME/.claude/.sync-back/data/projects" -name "CLAUDE.md" 2>/dev/null | wc -l)
+        MEMORY_COUNT=$(find "$HOME/.claude/.sync-back/data/projects" -path "*/memory/*" -type f 2>/dev/null | wc -l)
+        [ "$CLAUDE_MD_COUNT" -gt 0 ] && echo "[sandbox] INFO: $CLAUDE_MD_COUNT project CLAUDE.md file(s) synced back. Review for unexpected instructions."
+        [ "$MEMORY_COUNT" -gt 0 ] && echo "[sandbox] INFO: $MEMORY_COUNT memory file(s) synced back."
+    fi
 fi
 # Clean up sync staging directory
 rm -rf "$HOME/.claude/.sync-back" 2>/dev/null || true
 
 # Post-exit workspace audit: warn if the session planted files that could execute
 # code on the host outside the sandbox (persistence via workspace write-back).
+
+# 1. Hash-based .git/config tamper detection with auto-restore
+# The entrypoint sanitizes .git/config (strips dangerous keys) then writes the
+# post-sanitization hash to GIT_CONFIG_HASH_FILE. We compare against that baseline
+# so the sanitization itself doesn't trigger a false positive.
+ENTRYPOINT_HASH=""
+if [ -f "$GIT_CONFIG_HASH_FILE" ] && [ -s "$GIT_CONFIG_HASH_FILE" ]; then
+    ENTRYPOINT_HASH=$(cat "$GIT_CONFIG_HASH_FILE")
+fi
+rm -f "$GIT_CONFIG_HASH_FILE" 2>/dev/null || true
+POST_GIT_CONFIG_HASH=$(shasum -a 256 "$PROJECT_DIR/.git/config" 2>/dev/null | cut -d' ' -f1)
+if [ -n "$ENTRYPOINT_HASH" ]; then
+    # Entrypoint sanitization ran. Compare current hash to post-sanitization baseline.
+    # Both sha256sum (GNU) and shasum -a 256 (macOS) produce identical 64-char hex.
+    if [ "$ENTRYPOINT_HASH" != "$POST_GIT_CONFIG_HASH" ]; then
+        echo ""
+        echo "[sandbox] WARNING: .git/config was modified during the session!"
+        echo "[sandbox] Auto-restoring from pre-session backup and re-sanitizing..."
+        cp "$GIT_CONFIG_BACKUP" "$PROJECT_DIR/.git/config"
+        # Re-apply the same sanitization the entrypoint performed, so we don't
+        # restore dangerous keys that were in the original config.
+        for _key in core.fsmonitor core.sshCommand include.path; do
+            git config -f "$PROJECT_DIR/.git/config" --unset-all "$_key" 2>/dev/null || true
+        done
+        git config -f "$PROJECT_DIR/.git/config" --remove-section alias 2>/dev/null || true
+        git config -f "$PROJECT_DIR/.git/config" --remove-section include 2>/dev/null || true
+        # Remove all [includeIf "..."] sections (--remove-section can't match these;
+        # see entrypoint.sh comment for details)
+        if grep -q '^\[includeIf ' "$PROJECT_DIR/.git/config" 2>/dev/null; then
+            _tmp=$(mktemp)
+            awk '/^\[includeIf /{ skip=1; next } /^\[/{ skip=0 } !skip{ print }' \
+                "$PROJECT_DIR/.git/config" > "$_tmp" && cat "$_tmp" > "$PROJECT_DIR/.git/config"
+            rm -f "$_tmp"
+        fi
+        echo "[sandbox] .git/config restored. Review with: git config --local --list"
+    fi
+elif [ -n "$GIT_CONFIG_HASH_PRE" ] && [ "$GIT_CONFIG_HASH_PRE" != "$POST_GIT_CONFIG_HASH" ]; then
+    # No entrypoint hash (not a git repo that was sanitized). Fall back to pre-session comparison.
+    echo ""
+    echo "[sandbox] WARNING: .git/config was modified during the session!"
+    echo "[sandbox] Auto-restoring .git/config from pre-session backup..."
+    cp "$GIT_CONFIG_BACKUP" "$PROJECT_DIR/.git/config"
+    echo "[sandbox] .git/config restored. Review with: git config --local --list"
+fi
+rm -f "$GIT_CONFIG_BACKUP" 2>/dev/null || true
+
+# 2. Detect new hooks (non-.sample files added to .git/hooks/)
+POST_HOOKS_LISTING=$(ls -la "$PROJECT_DIR/.git/hooks/" 2>/dev/null || true)
+if [ "$HOOKS_LISTING" != "$POST_HOOKS_LISTING" ]; then
+    NEW_HOOKS=""
+    for hook in "$PROJECT_DIR/.git/hooks/"*; do
+        [ -f "$hook" ] || continue
+        case "$hook" in *.sample) continue ;; esac
+        NEW_HOOKS+="  - $hook"$'\n'
+    done
+    if [ -n "$NEW_HOOKS" ]; then
+        echo ""
+        echo "[sandbox] WARNING: New git hooks detected — these execute automatically on git operations:"
+        printf '%s' "$NEW_HOOKS"
+    fi
+fi
+
+# 3. Scan .git/config for dangerous keys as final check
+if [ -f "$PROJECT_DIR/.git/config" ]; then
+    GIT_CONFIG_WARNINGS=""
+    for key in core.fsmonitor core.sshCommand core.hooksPath include.path; do
+        if git config -f "$PROJECT_DIR/.git/config" --get-all "$key" >/dev/null 2>&1; then
+            GIT_CONFIG_WARNINGS+="  - $key"$'\n'
+        fi
+    done
+    # Check for alias and includeIf sections
+    for section in alias includeIf; do
+        if git config -f "$PROJECT_DIR/.git/config" --get-regexp "^${section}\." >/dev/null 2>&1; then
+            GIT_CONFIG_WARNINGS+="  - ${section}.* section"$'\n'
+        fi
+    done
+    if [ -n "$GIT_CONFIG_WARNINGS" ]; then
+        echo ""
+        echo "[sandbox] WARNING: Dangerous keys found in .git/config:"
+        printf '%s' "$GIT_CONFIG_WARNINGS"
+        echo "[sandbox] Review with: git config --local --list"
+    fi
+fi
+
+# 4. Suspect file existence warnings
 AUDIT_WARNINGS=""
 for suspect in \
     "$PROJECT_DIR/.envrc" \
@@ -374,8 +483,7 @@ for suspect in \
     "$PROJECT_DIR/.vscode/tasks.json" \
     "$PROJECT_DIR/Makefile" \
     "$PROJECT_DIR/.gitattributes" \
-    "$PROJECT_DIR/.github/workflows" \
-    "$PROJECT_DIR/.git/hooks"; do
+    "$PROJECT_DIR/.github/workflows"; do
     if [ -e "$suspect" ]; then
         AUDIT_WARNINGS+="  - $suspect"$'\n'
     fi
