@@ -44,7 +44,7 @@ _log "DNS resolver detected as: $DNS_RESOLVER"
 # resolver forwards all queries — enabling data exfiltration via subdomain
 # encoding (~50 bytes/query). These rules reduce tunneling throughput:
 # - Drop oversized UDP DNS packets (>192 bytes — normal queries are <128 bytes)
-# - Rate-limit claude user to 1/sec sustained, burst 5 (sufficient for npm/git/curl)
+# - Rate-limit claude user to 1/sec sustained, burst 2 (sufficient for npm/git/curl)
 # - At 1 query/sec × ~50 bytes payload, tunneling drops to ~25 B/s
 # - Root/system processes are unrestricted (needed during init for domain resolution
 #   and firewall verification; root only runs during entrypoint, before privilege drop)
@@ -54,8 +54,8 @@ iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m length --length 193:6
 iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 # Rate-limited DNS for claude user (anti-tunneling)
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 5 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 5 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
 # Block DNS to ALL other destinations (must come before general allowlist rules)
 iptables -A OUTPUT -p udp --dport 53 -j DROP
 iptables -A OUTPUT -p tcp --dport 53 -j DROP
@@ -79,8 +79,15 @@ if [ -z "$HOST_IP" ]; then
     exit 1
 fi
 
-HOST_NETWORK=$(echo "$HOST_IP" | sed "s/\.[0-9]*$/.0\/24/")
-_log "Host network detected as: $HOST_NETWORK"
+# Derive actual CIDR from the default route interface (not hardcoded /24)
+DEFAULT_IF=$(ip route | awk '/^default/ {print $5; exit}')
+HOST_NETWORK=$(ip -4 addr show dev "$DEFAULT_IF" 2>/dev/null | awk '/inet / {print $2; exit}')
+if [ -z "$HOST_NETWORK" ]; then
+    HOST_NETWORK=$(echo "$HOST_IP" | sed "s/\.[0-9]*$/.0\/24/")
+    _log "WARNING: Could not determine subnet CIDR, falling back to $HOST_NETWORK"
+else
+    _log "Host network detected as: $HOST_NETWORK (from $DEFAULT_IF)"
+fi
 
 # Set up remaining iptables rules
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT

@@ -146,8 +146,6 @@ if [ -n "$CLAUDE_CREDENTIALS" ]; then
     else
         log "[sandbox] Using existing credentials from volume (pass --fresh-creds to override)"
     fi
-    # Clear credentials from memory: unset and overwrite the variable
-    CLAUDE_CREDENTIALS="$(head -c ${#CLAUDE_CREDENTIALS} /dev/urandom | base64)"
     unset CLAUDE_CREDENTIALS
     unset FORCE_CREDENTIALS
 elif [ -f "$CREDS_FILE" ]; then
@@ -159,7 +157,7 @@ fi
 # Deferred credential scrub: overwrite and delete the plaintext credentials file
 # after Claude Code has had time to read and cache them. We overwrite rather than
 # chmod because virtiofs (macOS Docker mounts) ignores POSIX permission changes.
-(sleep 3 && {
+(sleep 1 && {
     CRED_SIZE=$(stat -c%s "$CREDS_FILE" 2>/dev/null || echo 0)
     if [ "$CRED_SIZE" -gt 0 ]; then
         dd if=/dev/urandom of="$CREDS_FILE" bs="$CRED_SIZE" count=1 conv=notrunc 2>/dev/null
@@ -210,9 +208,9 @@ if [ -f /workspace/.git/config ]; then
     # (e.g., [includeIf "gitdir:/path/"]) so --remove-section includeIf silently fails
     # (no bare [includeIf] section exists). Use awk to strip them from the raw file.
     if grep -q '^\[includeIf ' /workspace/.git/config 2>/dev/null; then
-        _tmp=$(mktemp)
+        _tmp="/workspace/.git/.includeif-strip.tmp"
         awk '/^\[includeIf /{ skip=1; next } /^\[/{ skip=0 } !skip{ print }' \
-            /workspace/.git/config > "$_tmp" && cat "$_tmp" > /workspace/.git/config
+            /workspace/.git/config > "$_tmp" && mv "$_tmp" /workspace/.git/config
         rm -f "$_tmp"
     fi
     # Write post-sanitization hash so the host can compare against a clean baseline
@@ -257,7 +255,6 @@ if [ -n "$GITHUB_TOKEN" ]; then
     # git-credential-cache--daemon inherits the caller's environment and persists
     # for the container lifetime — leaving the token in /proc/<pid>/environ.
     _GH_TOKEN="$GITHUB_TOKEN"
-    GITHUB_TOKEN="$(head -c ${#GITHUB_TOKEN} /dev/urandom | base64)"
     unset GITHUB_TOKEN
 
     # Feed token into cache daemon (run as claude so the socket is owned by claude)
@@ -274,8 +271,6 @@ if [ -n "$GITHUB_TOKEN" ]; then
         log "[sandbox] GitHub credentials configured (unscoped — no GitHub remote found)"
     fi
 
-    # Scrub local variables
-    _GH_TOKEN="$(head -c ${#_GH_TOKEN} /dev/urandom | base64)"
     unset _GH_TOKEN
     unset _REMOTE_URL _REPO_PATH
 fi
@@ -309,13 +304,9 @@ export DISABLE_ERROR_REPORTING=1
 # set takes effect when exec'ing the final command.
 #
 # /proc/<pid>/mem protection is provided by two layers:
-#   1. LD_PRELOAD=nodump.so (primary) — constructor calls prctl(PR_SET_DUMPABLE, 0)
-#      AFTER exec, inside the new process. This is the only reliable method because
-#      the kernel resets dumpable=1 on exec of readable binaries (would_dump).
-#   2. drop-dumpable (defense-in-depth) — sets dumpable=0 BEFORE exec. Ineffective
-#      alone (kernel resets it), but provides a fallback for statically-linked binaries
-#      that don't load LD_PRELOAD.
-#   3. chmod 711 on wrapped-git (belt-and-suspenders) — non-readable binaries
+#   1. nodump.so via /etc/ld.so.preload (primary) — constructor calls
+#      prctl(PR_SET_DUMPABLE, 0) AFTER exec, inside the new process.
+#   2. chmod 711 on wrapped-git (belt-and-suspenders) — non-readable binaries
 #      cause would_dump() to set dumpable=0 on exec, independent of LD_PRELOAD.
 #      (claude is excluded: Bun single-file executables must read themselves.)
 
@@ -325,7 +316,7 @@ SETPRIV_CMD=(setpriv
     --init-groups
     --inh-caps=-all
     --bounding-set=-all
-    -- /usr/local/bin/drop-dumpable "$@")
+    -- "$@")
 
 if [ "${SYNC_BACK:-}" = "1" ]; then
     # Run as child process so the EXIT trap fires when it ends.

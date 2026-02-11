@@ -38,6 +38,12 @@ Options:
   --allow-git-push        Enable git push from inside the container (blocked
                           by default for security). Consider using a fine-grained
                           GitHub PAT scoped to the target repo.
+  --disallow-broad-gh-token
+                          Reject broad-scope GitHub tokens (ghp_*/gho_*). Only
+                          fine-grained PATs (github_pat_*) are accepted. The AI
+                          agent can extract tokens from the credential cache
+                          (same-UID limitation) — narrow-scope tokens limit
+                          blast radius.
   --reload-firewall       Reload the firewall allowlist in all running
                           claude-sandbox containers. Edit firewall-allowlist.conf
                           then run this to apply changes without restarting.
@@ -49,10 +55,10 @@ Security layers:
   no-new-privileges, resource limits (memory/pids), no setuid binaries, privileged
   port binding blocked, --init (tini as PID 1, root-owned /proc/1/mem),
   nodump.so + git-guard.so via /etc/ld.so.preload (kernel-enforced, read-only
-  rootfs), core dumps disabled (ulimit -c 0), git wrapper + binary-level guard
-  (calling wrapped-git directly cannot bypass restrictions), hooksPath=/dev/null
-  and credential.helper forced on every git invocation, GitHub token scoped
-  to workspace repo only, privilege drop to UID 501 via setpriv,
+  rootfs), core dumps disabled (ulimit -c 0), git-guard.so via /etc/ld.so.preload
+  (binary-level enforcement), hooksPath=/dev/null and credential.helper forced
+  on every git invocation, GitHub token scoped to workspace repo (extractable
+  by AI — use fine-grained PATs), privilege drop to UID 501 via setpriv,
   ~/.claude mount isolation (read-only host mount + writable tmpfs, settings.json
   and user-level CLAUDE.md never synced back to host), post-exit workspace audit.
 
@@ -76,7 +82,8 @@ Argument routing:
   to claude as CLAUDE_ARGS.
 
   Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --no-sync-back,
-                 --with-gvisor, --reload-firewall, --allow-git-push
+                 --with-gvisor, --reload-firewall, --allow-git-push,
+                 --disallow-broad-gh-token
   Claude flags:  --continue, --resume, -p, --allowedTools, --model, etc.
 
 Examples:
@@ -101,6 +108,7 @@ SYNC_BACK=true
 WITH_GVISOR=false
 RELOAD_FIREWALL=false
 ALLOW_GIT_PUSH=false
+DISALLOW_BROAD_TOKEN=false
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -112,6 +120,7 @@ for arg in "$@"; do
         --with-gvisor) WITH_GVISOR=true ;;
         --reload-firewall) RELOAD_FIREWALL=true ;;
         --allow-git-push) ALLOW_GIT_PUSH=true ;;
+        --disallow-broad-gh-token) DISALLOW_BROAD_TOKEN=true ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -196,7 +205,17 @@ GH_TOKEN=$(gh auth token 2>/dev/null || true)
 if [ -n "$GH_TOKEN" ]; then
     case "$GH_TOKEN" in
         github_pat_*) log "[sandbox] Fine-grained GitHub token (good)" ;;
-        gho_*|ghp_*) log "[sandbox] WARNING: Broad-scope GitHub token. Consider a fine-grained PAT scoped to this repo." ;;
+        gho_*|ghp_*)
+            if [ "$DISALLOW_BROAD_TOKEN" = true ]; then
+                log "[sandbox] Broad-scope GitHub token rejected (--disallow-broad-gh-token)."
+                log "[sandbox] Create a fine-grained PAT: https://github.com/settings/personal-access-tokens/new"
+                GH_TOKEN=""
+            else
+                log "[sandbox] WARNING: Broad-scope GitHub token detected."
+                log "[sandbox] The AI agent can extract this token (same-UID limitation)."
+                log "[sandbox] Create a fine-grained PAT scoped to this repo: https://github.com/settings/personal-access-tokens/new"
+                log "[sandbox] Use --disallow-broad-gh-token to reject broad tokens."
+            fi ;;
         *) log "[sandbox] GitHub token found" ;;
     esac
 fi
@@ -306,6 +325,8 @@ fi
 # Snapshot .git/config and hooks listing for post-exit tamper detection
 GIT_CONFIG_BACKUP=$(mktemp)
 cp "$PROJECT_DIR/.git/config" "$GIT_CONFIG_BACKUP" 2>/dev/null || true
+# Note: macOS uses 'shasum -a 256'; the container uses 'sha256sum' (GNU).
+# Both produce identical 64-char hex digests — cross-boundary comparison works.
 # Pre-session hash used as fallback if entrypoint hash isn't available
 GIT_CONFIG_HASH_PRE=$(shasum -a 256 "$PROJECT_DIR/.git/config" 2>/dev/null | cut -d' ' -f1)
 # The entrypoint sanitizes .git/config (strips dangerous keys) which changes
@@ -369,6 +390,14 @@ rm -f "$ENTRYPOINT_LOG" 2>/dev/null || true
 
 # Sync-back: merge staged data into host ~/.claude/
 if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
+    # Audit staged data before syncing to host
+    if [ -d "$HOME/.claude/.sync-back/data/projects" ]; then
+        CLAUDE_MD_COUNT=$(find "$HOME/.claude/.sync-back/data/projects" -name "CLAUDE.md" 2>/dev/null | wc -l)
+        MEMORY_COUNT=$(find "$HOME/.claude/.sync-back/data/projects" -path "*/memory/*" -type f 2>/dev/null | wc -l)
+        [ "$CLAUDE_MD_COUNT" -gt 0 ] && echo "[sandbox] INFO: $CLAUDE_MD_COUNT project CLAUDE.md file(s) created during session (excluded from sync-back)."
+        [ "$MEMORY_COUNT" -gt 0 ] && echo "[sandbox] INFO: $MEMORY_COUNT memory file(s) will be synced back."
+    fi
+
     echo "[sandbox] Syncing session data back to host..."
     rsync -a --no-links \
         --exclude='settings.json' \
@@ -376,14 +405,6 @@ if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
         --exclude='CLAUDE.md' \
         "$HOME/.claude/.sync-back/data/" "$HOME/.claude/"
     echo "[sandbox] Sync complete"
-
-    # Warn about synced project-level CLAUDE.md and memory files
-    if [ -d "$HOME/.claude/.sync-back/data/projects" ]; then
-        CLAUDE_MD_COUNT=$(find "$HOME/.claude/.sync-back/data/projects" -name "CLAUDE.md" 2>/dev/null | wc -l)
-        MEMORY_COUNT=$(find "$HOME/.claude/.sync-back/data/projects" -path "*/memory/*" -type f 2>/dev/null | wc -l)
-        [ "$CLAUDE_MD_COUNT" -gt 0 ] && echo "[sandbox] INFO: $CLAUDE_MD_COUNT project CLAUDE.md file(s) synced back. Review for unexpected instructions."
-        [ "$MEMORY_COUNT" -gt 0 ] && echo "[sandbox] INFO: $MEMORY_COUNT memory file(s) synced back."
-    fi
 fi
 # Clean up sync staging directory
 rm -rf "$HOME/.claude/.sync-back" 2>/dev/null || true
@@ -419,9 +440,9 @@ if [ -n "$ENTRYPOINT_HASH" ]; then
         # Remove all [includeIf "..."] sections (--remove-section can't match these;
         # see entrypoint.sh comment for details)
         if grep -q '^\[includeIf ' "$PROJECT_DIR/.git/config" 2>/dev/null; then
-            _tmp=$(mktemp)
+            _tmp="$PROJECT_DIR/.git/.includeif-strip.tmp"
             awk '/^\[includeIf /{ skip=1; next } /^\[/{ skip=0 } !skip{ print }' \
-                "$PROJECT_DIR/.git/config" > "$_tmp" && cat "$_tmp" > "$PROJECT_DIR/.git/config"
+                "$PROJECT_DIR/.git/config" > "$_tmp" && mv "$_tmp" "$PROJECT_DIR/.git/config"
             rm -f "$_tmp"
         fi
         echo "[sandbox] .git/config restored. Review with: git config --local --list"

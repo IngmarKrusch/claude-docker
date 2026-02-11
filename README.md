@@ -9,7 +9,7 @@ Run Claude Code CLI in a hardened Docker container with defense-in-depth isolati
   - **Docker Desktop** — works with `--isolate-claude-data` flag
 - Claude Code installed on host (`curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials stored in keychain)
-- (Optional) GitHub CLI authenticated (`gh auth login`) — enables `git push` from inside the container (blocked by default; requires `--allow-git-push`). Use a fine-grained PAT scoped to the target repo for best security.
+- (Optional) GitHub CLI authenticated (`gh auth login`) — enables `git push` from the container. **Strongly recommended:** create a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) scoped to only the target repo. The AI agent can extract the token from the credential cache (same-UID limitation); narrow scope limits blast radius. Use `--disallow-broad-gh-token` to reject classic/OAuth tokens.
 
 ## Quick Start
 
@@ -36,12 +36,12 @@ The sandbox provides defense-in-depth isolation through multiple orthogonal hard
 | Layer | Protection |
 |-------|-----------|
 | **Filesystem** | Read-only rootfs. `/workspace` is writable. `~/.claude` is a writable tmpfs populated from a read-only host mount (`/mnt/.claude-host`, root-only) at startup — container writes never reach the host directly. `/tmp` is a noexec tmpfs. |
-| **Git operations** | `git push` blocked by default (opt in with `--allow-git-push`). `git remote add/set-url/rename` blocked. Dangerous `git config` keys blocked (`core.fsmonitor`, `core.sshCommand`, `filter.*`, etc.). Hook execution neutralized via `hooksPath=/dev/null`. **Enforced at binary level** via `git-guard.so` (`/etc/ld.so.preload`) — calling `/usr/libexec/wrapped-git` directly cannot bypass restrictions. |
+| **Git operations** | `git push` blocked by default (opt in with `--allow-git-push`). `git remote add/set-url/rename` blocked. Dangerous `git config` keys blocked (`core.fsmonitor`, `core.sshCommand`, `filter.*`, etc.). Hook execution neutralized via `hooksPath=/dev/null`. **Enforced at binary level** via `git-guard.so` (`/etc/ld.so.preload`). Note: the GitHub token is extractable by the AI agent (same-UID limitation) — use fine-grained PATs. |
 | **Seccomp** | Custom allowlist profile. Blocks io_uring, userfaultfd, personality, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret, and other high-risk syscalls. |
 | **Capabilities** | All dropped except CHOWN/SETUID/SETGID/SETPCAP (entrypoint setup) and NET_ADMIN/NET_RAW (firewall). Bounding set cleared after init. |
-| **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Only listed domains reachable. All other outbound traffic blocked. Outbound SSH (port 22) blocked (HTTPS-only for GitHub). DNS rate-limited to 1 query/sec (burst 2) to mitigate tunneling exfiltration (~50 B/s max). `sentry.io` removed from allowlist (accepts arbitrary POST data). Error reporting disabled via `DISABLE_ERROR_REPORTING=1`. |
+| **Network** | iptables allowlist from configurable `firewall-allowlist.conf`. Non-essential domains removed (statsig, VS Code marketplace — CDN domain fronting risk). DNS rate-limited to 1 query/sec (burst 2) to mitigate tunneling exfiltration (~50 B/s max). Outbound SSH (port 22) blocked. Error reporting disabled via `DISABLE_ERROR_REPORTING=1`. |
 | **Privilege drop** | Starts as root for setup, drops to UID 501 via `setpriv` with empty bounding set. No `sudo` in image. `no-new-privileges` prevents escalation. |
-| **Credentials** | OAuth tokens written to file inside container (tmpfs); env var cleared before exec. Tokens never persist to host. GitHub token stored only in `git credential-cache` daemon memory (never on disk). |
+| **Credentials** | OAuth tokens written to file inside container (tmpfs); env var cleared before exec. GitHub token stored in `git credential-cache` daemon memory (never on disk), but **extractable by the AI agent** via the cache socket (fundamental same-UID limitation). Use fine-grained PATs scoped to the workspace repo. |
 | **VM isolation** | OrbStack's lightweight VM provides a kernel-level boundary between container and macOS host. |
 
 ### `~/.claude/` mount isolation
@@ -79,6 +79,7 @@ Some attack surfaces are intentionally left open because closing them would brea
 - **npm postinstall scripts** — `npm install` runs arbitrary postinstall scripts. Blocking via `--ignore-scripts` would break MCP servers that rely on npx. Mitigated by the firewall allowlist restricting network access.
 - **History readable** — The container receives host `history.jsonl` (needed for `--continue`). DNS rate-limiting (~50 B/s) makes exfiltration impractical but does not prevent it entirely.
 - **Workspace write-back** — `/workspace` is writable (required for code editing). A compromised session could plant files (`.envrc`, `Makefile`, `.vscode/tasks.json`) that execute when the host opens the project. Post-exit audit warnings are displayed for known dangerous files.
+- **GitHub token extractable** — The AI agent runs as the same UID as git. Any mechanism that makes the token available to git also makes it available to the AI. Mitigated by using fine-grained PATs with minimal scope.
 
 ## Firewall Configuration
 
@@ -93,6 +94,7 @@ The container's outbound network allowlist is defined in `firewall-allowlist.con
 @github
 api.anthropic.com
 registry.npmjs.org
+api.todoist.com
 ```
 
 ### Adding or removing domains
@@ -135,6 +137,7 @@ These are consumed by `run-claude.sh` itself:
 - `--no-sync-back` — Disable sync-back of session data to host on clean exit
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
 - `--allow-git-push` — Enable `git push` from inside the container (blocked by default for security)
+- `--disallow-broad-gh-token` — Reject broad-scope GitHub tokens (ghp_*/gho_*). Only fine-grained PATs (github_pat_*) accepted.
 - `--reload-firewall` — Reload `firewall-allowlist.conf` in all running containers
 
 ### Passing arguments to Claude Code
@@ -159,11 +162,11 @@ The first argument that is an existing directory becomes the project dir. All ot
 ./run-claude.sh --allow-git-push ~/Projects/my-project
 ```
 
-When enabled, the sandbox extracts your GitHub token from the host's `gh` CLI and configures `git credential-cache` inside the container. The token **never touches disk** — it lives only in the credential-cache daemon's memory. The cache socket resides on `/tmp` (tmpfs), gone when the container exits. The `GITHUB_TOKEN` env var is overwritten with random data and unset before Claude Code starts.
+When enabled, the sandbox extracts your GitHub token from the host's `gh` CLI and configures `git credential-cache` inside the container. The token lives in the credential-cache daemon's memory (never on disk). The cache socket resides on `/tmp` (tmpfs), gone when the container exits. The `GITHUB_TOKEN` env var is unset before Claude Code starts.
 
 Additionally, `git remote add/set-url/rename` is always blocked (prevents adding exfiltration targets), and dangerous `git config` keys (`core.fsmonitor`, `core.sshCommand`, `filter.*`, `credential.helper`, etc.) are blocked.
 
-**Token scope warning:** If using a broad-scope GitHub token (classic PAT or OAuth), the launcher logs a warning. Consider creating a [fine-grained PAT](https://github.com/settings/personal-access-tokens) scoped to only the target repository.
+**Security limitation:** The AI agent runs as the same UID as git. Any mechanism that makes the token available to git (credential cache, env vars) also makes it extractable by the AI (e.g., via `net.connect` to the cache socket). This is a fundamental same-UID constraint. **Mitigation:** Use [fine-grained PATs](https://github.com/settings/personal-access-tokens/new) scoped to only the target repo. Use `--disallow-broad-gh-token` to reject classic/OAuth tokens at launch.
 
 Requirements:
 - `gh` CLI installed on host
@@ -200,7 +203,7 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild ~/Projects/my-projec
 │  │  ┌──────────────────────────────────────────┐  │  │
 │  │  │ Docker Container                         │  │  │
 │  │  │  Read-only rootfs + seccomp + no caps    │  │  │
-│  │  │  iptables allowlist (Anthropic/GitHub/…) │  │  │
+│  │  │  iptables allowlist (Anthropic/GitHub/npm/Todoist) │  │  │
 │  │  │                                          │  │  │
 │  │  │  Starts as root → setpriv drops to claude   │  │  │
 │  │  │  Claude Code CLI (native binary)         │  │  │
@@ -343,8 +346,8 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 - **reload-firewall.sh** — Reads `firewall-allowlist.conf`, resolves domains, atomic ipset swap
 - **firewall-allowlist.conf** — Configurable domain allowlist for the container firewall
 - **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus high-risk syscalls)
-- **git-guard.c** — LD_PRELOAD library enforcing git restrictions at binary level (compiled into `git-guard.so`, loaded via `/etc/ld.so.preload`)
+- **git-guard.c** — LD_PRELOAD library enforcing git operation restrictions (push, remote, submodule, config key blocking, GIT_CONFIG_COUNT forcing). Loaded via `/etc/ld.so.preload`.
+- **git-wrapper.sh** — Shell wrapper forcing GIT_CONFIG_COUNT on every git invocation (defense-in-depth for statically-linked callers)
 - **nodump.c** — LD_PRELOAD library setting PR_SET_DUMPABLE=0 (prevents `/proc/<pid>/mem` access)
-- **drop-dumpable.c** — Static wrapper setting dumpable=0 before exec (defense-in-depth for statically-linked binaries)
 - **lint.sh** — Runs Hadolint on Dockerfile via Docker
 - **.githooks/pre-commit** — Runs lint on commit; enable with `git config core.hooksPath .githooks`

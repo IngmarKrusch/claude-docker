@@ -37,13 +37,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 RUN find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true; \
     find / -perm -2000 -type f -exec chmod g-s {} + 2>/dev/null || true
 
-# Compile drop-dumpable wrapper (sets PR_SET_DUMPABLE=0 before exec — defense in
-# depth only; the primary protection is nodump.so via LD_PRELOAD, see below)
-COPY drop-dumpable.c /tmp/drop-dumpable.c
-RUN gcc -static -O2 -o /usr/local/bin/drop-dumpable /tmp/drop-dumpable.c \
-    && rm /tmp/drop-dumpable.c \
-    && chmod +x /usr/local/bin/drop-dumpable
-
 # Compile nodump.so — LD_PRELOAD library that calls prctl(PR_SET_DUMPABLE, 0) in
 # a constructor. Unlike drop-dumpable (which sets dumpable BEFORE exec and gets
 # reset by the kernel's would_dump), this runs AFTER exec inside the new process,
@@ -70,14 +63,10 @@ RUN gcc -shared -fPIC -O2 -o /usr/local/lib/git-guard.so /tmp/git-guard.c \
 # This ensures git-guard.so and nodump.so load into EVERY dynamically-linked process.
 RUN printf '/usr/local/lib/git-guard.so\n/usr/local/lib/nodump.so\n' > /etc/ld.so.preload
 
-# Git wrapper: replace ALL git entry points so /usr/bin/git can't bypass the wrapper.
-# Force hooksPath=/dev/null and credential.helper on every invocation.
-# Real binary moved to /usr/libexec/wrapped-git (NOT git-* to avoid git's
-# argv[0] subcommand detection treating the basename as a builtin command).
-# Rootfs is read-only so wrapper can't be modified at runtime.
-# Scans -c/--config-env for blocked keys (C1 fix), uses case-insensitive
-# matching (H1), handles --file/-f flags (H2), and skips global flags to
-# find the real subcommand (H4).
+# Git wrapper: forces GIT_CONFIG_COUNT on every git invocation (defense-in-depth).
+# Primary enforcement is git-guard.so via /etc/ld.so.preload. The wrapper only
+# provides env-var overrides for the narrow case of statically-linked callers.
+# Real binary at /usr/libexec/wrapped-git. Rootfs is read-only.
 COPY git-wrapper.sh /usr/local/bin/git
 RUN chmod +x /usr/local/bin/git \
     && mkdir -p /usr/libexec \

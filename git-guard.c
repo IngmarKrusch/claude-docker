@@ -7,9 +7,13 @@
  *   - git remote add/set-url/rename blocked
  *   - git config with dangerous keys blocked
  *   - git submodule add blocked
- *   - git credential fill/get blocked (approve/reject allowed)
  *   - GIT_CONFIG_COUNT env vars forced (hooksPath, credential.helper,
  *     core.fsmonitor, core.sshCommand)
+ *
+ * Known limitation: credential extraction (git credential fill/get) is NOT
+ * blocked — the AI runs as the same UID as git, so it can bypass any git-level
+ * block via direct socket access (net.connect to the credential cache socket).
+ * Mitigation: use fine-grained PATs with minimal scope.
  *
  * Root (UID 0) is exempt — the entrypoint is trusted init code.
  * Non-git processes return immediately (one readlink + strcmp).
@@ -121,6 +125,11 @@ static void git_guard_init(void) {
     if (n <= 0) return;
     cmdline[n] = '\0';
 
+    /* Reject if cmdline was truncated — blocked keys past the boundary
+     * would be silently missed. */
+    if (n >= (ssize_t)(sizeof(cmdline) - 1))
+        block("command line too long for sandbox validation");
+
     char *argv[MAX_ARGS];
     int argc = 0;
     char *p = cmdline;
@@ -187,19 +196,6 @@ static void git_guard_init(void) {
         if (strcmp(argv[sub_idx + 1], "add") == 0)
             block("git submodule add is disabled in the sandbox");
     }
-
-    /* Block: git credential fill/get (extraction), and direct credential
-     * helper invocation. "approve" and "reject" are allowed — they write
-     * to the cache (needed by entrypoint), they don't extract secrets. */
-    if (strcmp(subcmd, "credential") == 0 && sub_idx + 1 < argc) {
-        const char *cred_action = argv[sub_idx + 1];
-        if (strcmp(cred_action, "fill") == 0 ||
-            strcmp(cred_action, "get") == 0)
-            block("git credential extraction is disabled in the sandbox");
-    }
-    if (strcmp(subcmd, "credential-cache") == 0 ||
-        strcmp(subcmd, "credential-store") == 0)
-        block("direct git credential helper invocation is disabled in the sandbox");
 
     /* Block: git config <dangerous-key> */
     if (strcmp(subcmd, "config") == 0) {

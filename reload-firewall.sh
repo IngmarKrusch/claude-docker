@@ -54,6 +54,11 @@ while IFS= read -r line; do
         _log "Processing GitHub IPs..."
         while read -r cidr; do
             if [[ "$cidr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+                _prefix="${cidr##*/}"
+                if [ "$_prefix" -gt 32 ] 2>/dev/null; then
+                    _log "WARNING: Invalid CIDR prefix /$_prefix from GitHub meta: $cidr"
+                    continue
+                fi
                 /usr/sbin/ipset add "$IPSET_TMP" "$cidr" 2>/dev/null || true
                 ENTRY_COUNT=$((ENTRY_COUNT + 1))
             else
