@@ -126,7 +126,7 @@ The host's `~/.claude/` is mounted **read-only** at `/mnt/.claude-host` (root-on
 - `.config.json`, `settings.json`, `settings.local.json`, `CLAUDE.md` (read snapshots)
 - `history.jsonl` (for `--continue`/`--resume`)
 - Current project's `projects/<path>/` data (memory + transcripts) — **host project path** (`PROJECT_PATH`) is used for encoding to prevent cross-project data leakage (container's `/workspace` encoding is shared across all projects without this)
-- `statsig/`, `plugins/`, `stats-cache.json`
+- `statsig/`, `plugins/`, `plans/`, `todos/`, `stats-cache.json`
 
 | Attack | Protection |
 |--------|-----------|
