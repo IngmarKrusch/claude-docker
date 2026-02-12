@@ -609,10 +609,16 @@ if [ -n "$AUDIT_WARNINGS" ]; then
     echo "[sandbox] Use 'git diff' to inspect changes."
 fi
 
-if [ -n "$LAUNCH_LOG" ]; then
+SESSION_ID=$(tail -1 "$HOME/.claude/history.jsonl" 2>/dev/null \
+    | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('sessionId',''))" 2>/dev/null || true)
+
+if [ -n "$LAUNCH_LOG" ] || [ -n "$SESSION_ID" ]; then
     echo ""
     echo "[sandbox] Launch log:"
-    printf '%s' "$LAUNCH_LOG"
+    [ -n "$LAUNCH_LOG" ] && printf '%s' "$LAUNCH_LOG"
+    if [ -n "$SESSION_ID" ]; then
+        echo "[sandbox] Session ID: $SESSION_ID"
+    fi
 fi
 
 exit $DOCKER_EXIT
