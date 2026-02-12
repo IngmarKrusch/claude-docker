@@ -41,7 +41,7 @@ RUN find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true; \
 # a constructor. Unlike drop-dumpable (which sets dumpable BEFORE exec and gets
 # reset by the kernel's would_dump), this runs AFTER exec inside the new process,
 # making /proc/<pid>/mem inaccessible to same-UID children.
-COPY nodump.c /tmp/nodump.c
+COPY container/nodump.c /tmp/nodump.c
 RUN mkdir -p /usr/local/lib \
     && gcc -shared -fPIC -O2 -o /usr/local/lib/nodump.so /tmp/nodump.c \
     && rm /tmp/nodump.c \
@@ -53,7 +53,7 @@ RUN mkdir -p /usr/local/lib \
 # remote modification blocking, dangerous config key blocking, and forced
 # GIT_CONFIG_COUNT overrides. Root (UID 0) is exempt for entrypoint init.
 # This is the PRIMARY enforcement layer — the shell wrapper is belt-and-suspenders.
-COPY git-guard.c /tmp/git-guard.c
+COPY container/git-guard.c /tmp/git-guard.c
 RUN gcc -shared -fPIC -O2 -o /usr/local/lib/git-guard.so /tmp/git-guard.c \
     && rm /tmp/git-guard.c \
     && chmod 755 /usr/local/lib/git-guard.so
@@ -67,7 +67,7 @@ RUN printf '/usr/local/lib/git-guard.so\n/usr/local/lib/nodump.so\n' > /etc/ld.s
 # Primary enforcement is git-guard.so via /etc/ld.so.preload. The wrapper only
 # provides env-var overrides for the narrow case of statically-linked callers.
 # Real binary at /usr/libexec/wrapped-git. Rootfs is read-only.
-COPY git-wrapper.sh /usr/local/bin/git
+COPY container/git-wrapper.sh /usr/local/bin/git
 RUN chmod +x /usr/local/bin/git \
     && mkdir -p /usr/libexec \
     && mv /usr/bin/git /usr/libexec/wrapped-git \
@@ -92,12 +92,12 @@ RUN apt-get purge -y --auto-remove gcc libc6-dev \
 RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/sbin/chroot /usr/sbin/pivot_root
 
 # Firewall scripts
-COPY init-firewall.sh /usr/local/bin/init-firewall.sh
-COPY reload-firewall.sh /usr/local/bin/reload-firewall.sh
+COPY container/init-firewall.sh /usr/local/bin/init-firewall.sh
+COPY container/reload-firewall.sh /usr/local/bin/reload-firewall.sh
 RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/reload-firewall.sh
 
 # Entrypoint
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 RUN mkdir -p /mnt/.claude-host && chmod 700 /mnt/.claude-host

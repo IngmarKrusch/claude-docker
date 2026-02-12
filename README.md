@@ -66,7 +66,7 @@ Outbound traffic is restricted to an allowlist of resolved IPs via iptables + ip
 | Rule | Purpose |
 |------|---------|
 | **IPv6 completely disabled** | Kernel sysctls `net.ipv6.conf.all.disable_ipv6=1` and `net.ipv6.conf.default.disable_ipv6=1` prevent IPv6 firewall bypass |
-| IP allowlist (`firewall-allowlist.conf`) | Only resolved IPs from configured domains are reachable (Anthropic API, GitHub, npm registry) |
+| IP allowlist (`config/firewall-allowlist.conf`) | Only resolved IPs from configured domains are reachable (Anthropic API, GitHub, npm registry) |
 | **Port restriction: TCP 443/80 only** | ipset rules restrict allowlisted domains to HTTPS (443) and HTTP (80) — prevents exfiltration via non-standard ports |
 | DNS pinned to container resolver | All DNS goes through the internal resolver; direct external DNS blocked |
 | DNS rate limit: 1 query/sec, burst 2 | Anti-tunneling — limits DNS exfiltration to ~25 B/s (sufficient for npm/git/curl, impractical for bulk data) |
@@ -206,7 +206,7 @@ Honest disclosure of defenses that were found ineffective and replaced or remove
 
 ## Firewall Configuration
 
-The container's outbound network allowlist is defined in `firewall-allowlist.conf` in the project directory. The file is bind-mounted read-only into the container — Claude cannot modify it.
+The container's outbound network allowlist is defined in `config/firewall-allowlist.conf`. The file is bind-mounted read-only into the container — Claude cannot modify it.
 
 ### Default allowlist
 
@@ -217,7 +217,7 @@ registry.npmjs.org         # npm packages (MCP servers)
 api.todoist.com            # Todoist MCP server
 ```
 
-**Removed domains** (documented in `firewall-allowlist.conf` comments):
+**Removed domains** (documented in `config/firewall-allowlist.conf` comments):
 - `sentry.io` — accepts arbitrary POST data (exfiltration channel)
 - `statsig.com`, `statsig.anthropic.com` — accept arbitrary POST data
 - `marketplace.visualstudio.com`, `vscode.blob.core.windows.net`, `update.code.visualstudio.com` — Azure CDN shared IPs (domain fronting risk)
@@ -236,11 +236,11 @@ api.todoist.com
 
 ### Adding or removing domains
 
-Edit `firewall-allowlist.conf` on the host, then apply to running containers:
+Edit `config/firewall-allowlist.conf` on the host, then apply to running containers:
 
 ```bash
 # Edit the config
-echo "httpbin.org" >> firewall-allowlist.conf
+echo "httpbin.org" >> config/firewall-allowlist.conf
 
 # Reload all running containers
 ./run-claude.sh --reload-firewall
@@ -275,7 +275,7 @@ These are consumed by `run-claude.sh` itself:
 - `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
 - `--allow-git-push` — Enable `git push` from inside the container (blocked by default for security)
 - `--disallow-broad-gh-token` — Reject broad-scope GitHub tokens (`ghp_*`/`gho_*`). Only fine-grained PATs (`github_pat_*`) accepted.
-- `--reload-firewall` — Reload `firewall-allowlist.conf` in all running containers
+- `--reload-firewall` — Reload `config/firewall-allowlist.conf` in all running containers
 
 ### Passing arguments to Claude Code
 
@@ -499,15 +499,26 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 
 ## File Reference
 
+**Root** — build entry point, user-facing scripts, metadata:
 - **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, guard library compilation, `setpriv` for privilege drop
-- **entrypoint.sh** — Mount isolation (host state copy), firewall init, credential lifecycle, git config sanitization, sync-back trap, privilege drop
 - **run-claude.sh** — Host launcher: keychain extraction, token refresh, image build, hardened container launch, post-exit workspace audit, sync-back merge
-- **init-firewall.sh** — iptables chain setup, DNS rate limiting (1/sec burst 2, 192-byte cap), SSH blocking, ipset creation, connectivity verification
-- **reload-firewall.sh** — Reads `firewall-allowlist.conf`, resolves domains, fetches GitHub IPs, atomic ipset swap
-- **firewall-allowlist.conf** — Configurable domain allowlist for the container firewall
-- **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus ptrace, process_vm, perf_event, memfd, io_uring, userfaultfd, personality; AF_VSOCK blocked; clone namespace flags including CLONE_NEWTIME blocked)
-- **git-guard.c** — LD_PRELOAD library enforcing git operation restrictions (push, remote, submodule, config key blocking, `GIT_CONFIG_COUNT` forcing). Loaded via `/etc/ld.so.preload` on read-only rootfs.
-- **git-wrapper.sh** — Shell wrapper forcing `GIT_CONFIG_COUNT` on every git invocation (defense-in-depth for statically-linked callers)
-- **nodump.c** — LD_PRELOAD library setting `PR_SET_DUMPABLE=0` after exec (prevents `/proc/<pid>/mem` access)
 - **lint.sh** — Runs Hadolint on Dockerfile via Docker
 - **.githooks/pre-commit** — Runs lint on commit; enable with `git config core.hooksPath .githooks`
+
+**container/** — files COPY'd into the Docker image:
+- **container/entrypoint.sh** — Mount isolation (host state copy), firewall init, credential lifecycle, git config sanitization, sync-back trap, privilege drop
+- **container/init-firewall.sh** — iptables chain setup, DNS rate limiting (1/sec burst 2, 192-byte cap), SSH blocking, ipset creation, connectivity verification
+- **container/reload-firewall.sh** — Reads `config/firewall-allowlist.conf`, resolves domains, fetches GitHub IPs, atomic ipset swap
+- **container/git-guard.c** — LD_PRELOAD library enforcing git operation restrictions (push, remote, submodule, config key blocking, `GIT_CONFIG_COUNT` forcing). Loaded via `/etc/ld.so.preload` on read-only rootfs.
+- **container/git-wrapper.sh** — Shell wrapper forcing `GIT_CONFIG_COUNT` on every git invocation (defense-in-depth for statically-linked callers)
+- **container/nodump.c** — LD_PRELOAD library setting `PR_SET_DUMPABLE=0` after exec (prevents `/proc/<pid>/mem` access)
+
+**config/** — runtime config (mounted/referenced by `docker run`):
+- **config/firewall-allowlist.conf** — Configurable domain allowlist for the container firewall
+- **config/seccomp-profile.json** — Custom seccomp allowlist (Docker default minus ptrace, process_vm, perf_event, memfd, io_uring, userfaultfd, personality; AF_VSOCK blocked; clone namespace flags including CLONE_NEWTIME blocked)
+
+**docs/** — documentation (except README):
+- **docs/SECURITY-AUDIT-REPORT.md** — Security audit report
+- **docs/ROUND-10-IMPLEMENTATION.md** — Round 10 implementation notes
+- **docs/audit/FINDINGS.md** — Audit findings
+- **docs/audit/AUDIT-ROUND-10.md** — Round 10 audit details

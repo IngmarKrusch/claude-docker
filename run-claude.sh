@@ -51,7 +51,7 @@ Options:
                           (same-UID limitation) — narrow-scope tokens limit
                           blast radius.
   --reload-firewall       Reload the firewall allowlist in all running
-                          claude-sandbox containers. Edit firewall-allowlist.conf
+                          claude-sandbox containers. Edit config/firewall-allowlist.conf
                           then run this to apply changes without restarting.
 
 Security layers:
@@ -392,7 +392,7 @@ docker run --rm -it \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
     --security-opt=no-new-privileges \
-    --security-opt seccomp="$SCRIPT_DIR/seccomp-profile.json" \
+    --security-opt seccomp="$SCRIPT_DIR/config/seccomp-profile.json" \
     --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
     --sysctl net.ipv6.conf.all.disable_ipv6=1 \
     --sysctl net.ipv6.conf.default.disable_ipv6=1 \
@@ -408,7 +408,7 @@ docker run --rm -it \
     --shm-size=64m \
     -v "$PROJECT_DIR":/workspace \
     $GITCONFIG_MOUNT \
-    -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
+    -v "$SCRIPT_DIR/config/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     $CLAUDE_MOUNT_FLAGS \
     $SYNC_BACK_FLAGS \
     -v "$ENTRYPOINT_LOG":/run/entrypoint.log \
