@@ -39,23 +39,20 @@ if [ -z "$DNS_RESOLVER" ]; then
 fi
 _log "DNS resolver detected as: $DNS_RESOLVER"
 
-# Rate-limit and size-limit DNS to mitigate DNS tunneling exfiltration.
-# DNS is pinned to the internal resolver (no direct external DNS), but the
-# resolver forwards all queries — enabling data exfiltration via subdomain
-# encoding (~50 bytes/query). These rules reduce tunneling throughput:
-# - Drop oversized UDP DNS packets (>192 bytes — normal queries are <128 bytes)
-# - Rate-limit claude user to 1/sec sustained, burst 2 (sufficient for npm/git/curl)
-# - At 1 query/sec × ~50 bytes payload, tunneling drops to ~25 B/s
-# - Root/system processes are unrestricted (needed during init for domain resolution
-#   and firewall verification; root only runs during entrypoint, before privilege drop)
+# DNS exfiltration prevention: block ALL DNS for the claude user.
+# Allowlisted domains are pre-resolved on the host and injected into /etc/hosts
+# via Docker --add-host flags. The container's glibc checks /etc/hosts before
+# DNS (nsswitch.conf: hosts: files dns), so tools resolve from the static entries.
+# Root/system processes retain DNS access for ipset population during init.
+# Oversized DNS packets are still dropped as defense-in-depth.
 CLAUDE_UID=$(id -u claude)
 iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m length --length 193:65535 -j DROP
 # Unrestricted DNS for root/system processes (init, firewall setup, verification)
 iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner ! --uid-owner "$CLAUDE_UID" -j ACCEPT
-# Rate-limited DNS for claude user (anti-tunneling)
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner "$CLAUDE_UID" -m limit --limit 1/sec --limit-burst 2 -j ACCEPT
+# Block ALL DNS for claude user — domains pre-resolved via /etc/hosts (--add-host)
+iptables -A OUTPUT -p udp --dport 53 -m owner --uid-owner "$CLAUDE_UID" -j DROP
+iptables -A OUTPUT -p tcp --dport 53 -m owner --uid-owner "$CLAUDE_UID" -j DROP
 # Block DNS to ALL other destinations (must come before general allowlist rules)
 iptables -A OUTPUT -p udp --dport 53 -j DROP
 iptables -A OUTPUT -p tcp --dport 53 -j DROP
@@ -130,8 +127,8 @@ else
     _log "Firewall verification passed - able to reach https://api.github.com as expected"
 fi
 
-# Verify firewall rules work for the claude user (not just root, which is exempt
-# from DNS rate limiting and packet size limits) (M5 fix)
+# Verify firewall rules work for the claude user (not just root, which retains
+# DNS access). Claude user resolves hostnames via /etc/hosts (pre-resolved on host).
 if ! gosu claude curl --connect-timeout 10 https://api.github.com/zen >/dev/null 2>&1; then
-    _log "WARNING: Claude user cannot reach GitHub API - DNS rate limit may be too aggressive"
+    _log "WARNING: Claude user cannot reach GitHub API - check /etc/hosts entries (--add-host)"
 fi

@@ -222,6 +222,11 @@ if [ -f /tmp/host-gitconfig ]; then
     # be able to plant hooks that execute on the host (or in future containers).
     HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
         /usr/libexec/wrapped-git config --global core.hooksPath /dev/null
+    # Strip filter section from global gitconfig (same as workspace sanitization).
+    # git-guard blocks 'git config filter.*' but the file can be edited directly
+    # (sed, python, etc.) and git reads the raw config when executing filter commands.
+    HOME=/home/claude GIT_CONFIG_GLOBAL="$GITCONFIG" \
+        /usr/libexec/wrapped-git config --global --remove-section "filter" 2>/dev/null || true
     log "[sandbox] Git configured"
 fi
 export GIT_CONFIG_GLOBAL="$GITCONFIG"
@@ -318,6 +323,14 @@ fi
 # Done here (not earlier) because root without CAP_DAC_OVERRIDE cannot write
 # to directories/files owned by other users — all root writes must complete first.
 chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/null || true
+
+# Lock down gitconfig: prevent session from modifying git configuration.
+# Must come AFTER the blanket chown (which sets everything to claude) and
+# AFTER all git config --global writes (credential.helper, useHttpPath, etc.).
+# Git only needs to READ the global config; GIT_CONFIG_COUNT env var overrides
+# from the git wrapper don't write to the file.
+chown root:root "$GITCONFIG" 2>/dev/null || true
+chmod 444 "$GITCONFIG" 2>/dev/null || true
 
 # Set user environment variables that 'USER claude' in Dockerfile would have
 # provided. gosu only changes uid/gid, it does not set these.

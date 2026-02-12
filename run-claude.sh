@@ -57,21 +57,22 @@ Options:
 Security layers:
   Read-only rootfs, custom seccomp allowlist (ptrace blocked), all capabilities
   dropped (except CHOWN/SETUID/SETGID/SETPCAP/NET_ADMIN/NET_RAW — bounding set
-  cleared after init), iptables firewall (allowlist-only, DNS rate-limited),
-  no-new-privileges, resource limits (memory/pids), no setuid binaries, privileged
-  port binding blocked, --init (tini as PID 1, root-owned /proc/1/mem),
-  nodump.so + git-guard.so via /etc/ld.so.preload (kernel-enforced, read-only
-  rootfs), core dumps disabled (ulimit -c 0), git-guard.so via /etc/ld.so.preload
-  (binary-level enforcement), hooksPath=/dev/null and credential.helper forced
-  on every git invocation, GitHub token scoped to workspace repo (extractable
-  by AI — use fine-grained PATs), privilege drop to UID 501 via setpriv,
-  ~/.claude mount isolation (read-only host mount + writable tmpfs, settings.json
-  and user-level CLAUDE.md never synced back to host), post-exit workspace audit.
+  cleared after init), iptables firewall (allowlist-only, DNS blocked for claude
+  user with pre-resolved /etc/hosts), no-new-privileges, resource limits
+  (memory/pids), no setuid binaries, privileged port binding blocked, --init
+  (tini as PID 1, root-owned /proc/1/mem), nodump.so + git-guard.so via
+  /etc/ld.so.preload (kernel-enforced, read-only rootfs), core dumps disabled
+  (ulimit -c 0), hooksPath=/dev/null and credential.helper forced on every git
+  invocation, global gitconfig locked (root:root 444), GitHub token scoped to
+  workspace repo (extractable by AI — use fine-grained PATs), privilege drop to
+  UID 501 via setpriv, ~/.claude host-side staging (only needed files exposed,
+  writable tmpfs, settings.json and user-level CLAUDE.md never synced back to
+  host), post-exit workspace audit.
 
 Runtime compatibility:
   OrbStack (recommended):
     ./run-claude.sh ~/Projects/my-project
-    Mounts host ~/.claude/ read-only with writable tmpfs overlay. Session
+    Stages only needed ~/.claude/ files into temp dir (read-only mount). Session
     data syncs back on clean exit. Firewall and all hardening layers work
     out of the box.
 
@@ -321,9 +322,34 @@ else
         log "[sandbox] Created initial config"
     fi
 
-    # Read-only host mount at alternate path + writable tmpfs at real path
-    CLAUDE_MOUNT_FLAGS="-v $HOME/.claude:/mnt/.claude-host:ro --tmpfs /home/claude/.claude:rw,nosuid,size=512m"
-    log "[sandbox] Mounting ~/.claude read-only (writes go to tmpfs)"
+    # Host-side staging: copy ONLY the files the entrypoint needs into a temp
+    # directory and mount that — NOT the entire ~/.claude. This prevents a
+    # compromised session from reading cross-project history, debug logs, config
+    # backups, and other sensitive data. virtiofs on macOS ignores POSIX permission
+    # changes, so chmod 700 on the mount point cannot restrict access.
+    CLAUDE_STAGING=$(mktemp -d)
+
+    # Individual files (matches entrypoint.sh lines 24-83)
+    for f in .config.json settings.json settings.local.json statusline-command.sh \
+             CLAUDE.md history.jsonl stats-cache.json; do
+        cp -P "$HOME/.claude/$f" "$CLAUDE_STAGING/" 2>/dev/null || true
+    done
+
+    # Current project data only (matches entrypoint.sh lines 42-60)
+    _HOST_ENCODED=$(echo "$PROJECT_DIR" | sed 's|/|-|g')
+    if [ -d "$HOME/.claude/projects/$_HOST_ENCODED" ]; then
+        mkdir -p "$CLAUDE_STAGING/projects/$_HOST_ENCODED"
+        cp -rP "$HOME/.claude/projects/$_HOST_ENCODED/." \
+               "$CLAUDE_STAGING/projects/$_HOST_ENCODED/" 2>/dev/null || true
+    fi
+
+    # Directories (matches entrypoint.sh lines 63-80)
+    for d in statsig plugins plans todos; do
+        [ -d "$HOME/.claude/$d" ] && cp -rP "$HOME/.claude/$d" "$CLAUDE_STAGING/" 2>/dev/null || true
+    done
+
+    CLAUDE_MOUNT_FLAGS="-v $CLAUDE_STAGING:/mnt/.claude-host:ro --tmpfs /home/claude/.claude:rw,nosuid,size=512m"
+    log "[sandbox] Staged ~/.claude data (host-side, read-only mount)"
 
     # Set up sync-back staging directory
     if [ "$SYNC_BACK" = true ]; then
@@ -384,7 +410,7 @@ done
 ENTRYPOINT_LOG=$(mktemp)
 
 # L1 fix: clean up all tempfiles on signal/early-exit
-_cleanup_temps() { rm -f "$GIT_CONFIG_BACKUP" "$GIT_CONFIG_HASH_FILE" "$ENTRYPOINT_LOG" "$ENVFILE" 2>/dev/null; }
+_cleanup_temps() { rm -f "$GIT_CONFIG_BACKUP" "$GIT_CONFIG_HASH_FILE" "$ENTRYPOINT_LOG" "$ENVFILE" 2>/dev/null; rm -rf "${CLAUDE_STAGING:-}" 2>/dev/null; }
 trap _cleanup_temps EXIT
 
 # Delete env file shortly after docker reads it (minimizes on-disk exposure)
@@ -394,6 +420,32 @@ trap _cleanup_temps EXIT
 GITCONFIG_MOUNT=""
 if [ -f "$HOME/.gitconfig" ]; then
     GITCONFIG_MOUNT="-v $HOME/.gitconfig:/tmp/host-gitconfig:ro"
+fi
+
+# Pre-resolve allowlisted domains and inject into container /etc/hosts via
+# --add-host. Combined with DNS blocking in init-firewall.sh, this completely
+# eliminates DNS tunneling exfiltration (~25 B/s was possible with rate-limiting).
+# The ipset (populated inside the container by root) still controls IP-level
+# filtering; these entries only provide hostname resolution.
+ADD_HOST_FLAGS=""
+ALLOWLIST_CONF="$SCRIPT_DIR/config/firewall-allowlist.conf"
+if [ -f "$ALLOWLIST_CONF" ]; then
+    while IFS= read -r _fw_line; do
+        _fw_line=$(echo "$_fw_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$_fw_line" || "$_fw_line" == \#* ]] && continue
+        if [ "$_fw_line" = "@github" ]; then
+            # Resolve the specific GitHub hosts that git/gh CLI connect to
+            for _gh_host in github.com api.github.com; do
+                for _ip in $(dig +short A "$_gh_host" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
+                    ADD_HOST_FLAGS+=" --add-host=${_gh_host}:${_ip}"
+                done
+            done
+        else
+            for _ip in $(dig +short A "$_fw_line" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
+                ADD_HOST_FLAGS+=" --add-host=${_fw_line}:${_ip}"
+            done
+        fi
+    done < "$ALLOWLIST_CONF"
 fi
 
 set +e
@@ -432,6 +484,7 @@ docker run --rm -it \
     -v "$GIT_CONFIG_HASH_FILE":/run/git-config-hash \
     -e ENTRYPOINT_LOG=/run/entrypoint.log \
     -e PROJECT_PATH="$PROJECT_DIR" \
+    $ADD_HOST_FLAGS \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
 DOCKER_EXIT=$?
