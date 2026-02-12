@@ -69,6 +69,16 @@ if [ -d "$HOST_CLAUDE" ]; then
         cp -rP "$HOST_CLAUDE/plugins" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
+    # 7b. Plans (persist across sessions for plan-mode workflows)
+    if [ -d "$HOST_CLAUDE/plans" ]; then
+        cp -rP "$HOST_CLAUDE/plans" "$CLAUDE_DIR/" 2>/dev/null || true
+    fi
+
+    # 7c. Todos (persist across sessions)
+    if [ -d "$HOST_CLAUDE/todos" ]; then
+        cp -rP "$HOST_CLAUDE/todos" "$CLAUDE_DIR/" 2>/dev/null || true
+    fi
+
     # 8. Stats cache
     cp -P "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
 fi
