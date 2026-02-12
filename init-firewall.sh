@@ -105,8 +105,10 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # Block outbound SSH — this repo uses HTTPS for GitHub, and SSH port 22 is a
 # data exfiltration channel (raw TCP accepted by github.com:22 without auth).
 iptables -A OUTPUT -p tcp --dport 22 -j DROP
-# Allow other outbound traffic to allowed domains (HTTPS, etc.)
-iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
+# H2 Round 10 fix: Restrict ipset to HTTPS (443) and HTTP (80) only.
+# Previously allowed ALL protocols/ports to any IP in allowed-domains.
+iptables -A OUTPUT -p tcp --dport 443 -m set --match-set allowed-domains dst -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 80 -m set --match-set allowed-domains dst -j ACCEPT
 
 # Explicitly REJECT all other outbound traffic for immediate feedback
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
