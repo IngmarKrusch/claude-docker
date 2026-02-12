@@ -21,20 +21,20 @@ CLAUDE_DIR="/home/claude/.claude"
 
 if [ -d "$HOST_CLAUDE" ]; then
     # 1. Config (required for onboarding flags, user prefs, account info)
-    cp "$HOST_CLAUDE/.config.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/.config.json" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 2. Settings (copied as read snapshot — container edits don't propagate to host)
-    cp "$HOST_CLAUDE/settings.json" "$CLAUDE_DIR/" 2>/dev/null || true
-    cp "$HOST_CLAUDE/settings.local.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/settings.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/settings.local.json" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 2b. Status line script (referenced by settings.json statusLine command)
-    cp "$HOST_CLAUDE/statusline-command.sh" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/statusline-command.sh" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 3. User-level CLAUDE.md (project context, memory)
-    cp "$HOST_CLAUDE/CLAUDE.md" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/CLAUDE.md" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 4. Full history (needed for --continue/--resume to find past sessions)
-    cp "$HOST_CLAUDE/history.jsonl" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/history.jsonl" "$CLAUDE_DIR/" 2>/dev/null || true
     # Record baseline line count so sync-back can send only new entries
     wc -l < "$CLAUDE_DIR/history.jsonl" 2>/dev/null > "$CLAUDE_DIR/.history-baseline-lines" || true
 
@@ -42,30 +42,35 @@ if [ -d "$HOST_CLAUDE" ]; then
     #    Encode workspace path the same way Claude Code does (/ → -)
     WORKSPACE_PATH=$(readlink -f /workspace)
     ENCODED_PATH=$(echo "$WORKSPACE_PATH" | sed 's|/|-|g')
-    if [ -d "$HOST_CLAUDE/projects/$ENCODED_PATH" ]; then
+    # M12 Round 10 fix: Use host's real project path for data isolation.
+    # Inside the container, /workspace always encodes to -workspace, causing
+    # all projects to share the same data directory. PROJECT_PATH carries the
+    # host-side path so each project gets its own encoded directory.
+    if [ -n "${PROJECT_PATH:-}" ]; then
+        HOST_ENCODED=$(echo "$PROJECT_PATH" | sed 's|/|-|g')
+        if [ -d "$HOST_CLAUDE/projects/$HOST_ENCODED" ]; then
+            mkdir -p "$CLAUDE_DIR/projects/$ENCODED_PATH"
+            cp -rP "$HOST_CLAUDE/projects/$HOST_ENCODED/." \
+                  "$CLAUDE_DIR/projects/$ENCODED_PATH/" 2>/dev/null || true
+        fi
+    elif [ -d "$HOST_CLAUDE/projects/$ENCODED_PATH" ]; then
         mkdir -p "$CLAUDE_DIR/projects/$ENCODED_PATH"
-        cp -r "$HOST_CLAUDE/projects/$ENCODED_PATH/." \
+        cp -rP "$HOST_CLAUDE/projects/$ENCODED_PATH/." \
               "$CLAUDE_DIR/projects/$ENCODED_PATH/" 2>/dev/null || true
-    fi
-    # Also copy the -workspace project data (container's view of the path)
-    if [ -d "$HOST_CLAUDE/projects/-workspace" ]; then
-        mkdir -p "$CLAUDE_DIR/projects/-workspace"
-        cp -r "$HOST_CLAUDE/projects/-workspace/." \
-              "$CLAUDE_DIR/projects/-workspace/" 2>/dev/null || true
     fi
 
     # 6. Statsig cache (avoids re-fetching feature flags)
     if [ -d "$HOST_CLAUDE/statsig" ]; then
-        cp -r "$HOST_CLAUDE/statsig" "$CLAUDE_DIR/" 2>/dev/null || true
+        cp -rP "$HOST_CLAUDE/statsig" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
     # 7. Plugins (if any installed)
     if [ -d "$HOST_CLAUDE/plugins" ]; then
-        cp -r "$HOST_CLAUDE/plugins" "$CLAUDE_DIR/" 2>/dev/null || true
+        cp -rP "$HOST_CLAUDE/plugins" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
     # 8. Stats cache
-    cp "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -P "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
 fi
 
 echo "=== Entrypoint $(date) ===" >> "$LOGFILE"
@@ -96,6 +101,18 @@ sync_back_on_exit() {
             --exclude='entrypoint.log' \
             --exclude='.history-baseline-lines' \
             "$CLAUDE_DIR/" "$STAGING/" 2>/dev/null || true
+
+        # M12 Round 10 fix: Relocate -workspace project data to host-encoded
+        # path in staging so it syncs back to the correct project directory
+        if [ -n "${PROJECT_PATH:-}" ]; then
+            local HOST_ENCODED
+            HOST_ENCODED=$(echo "$PROJECT_PATH" | sed 's|/|-|g')
+            if [ "$HOST_ENCODED" != "-workspace" ] && [ -d "$STAGING/projects/-workspace" ]; then
+                mkdir -p "$STAGING/projects/$HOST_ENCODED"
+                cp -a "$STAGING/projects/-workspace/." "$STAGING/projects/$HOST_ENCODED/" 2>/dev/null || true
+                rm -rf "$STAGING/projects/-workspace"
+            fi
+        fi
     fi
 }
 
@@ -112,11 +129,14 @@ fi
 unset ALLOW_GIT_PUSH
 
 # Initialize firewall if NET_ADMIN capability is available
-if /usr/local/bin/init-firewall.sh 2>/dev/null; then
-    log "[sandbox] Firewall initialized"
-else
-    log "[sandbox] Warning: Firewall not initialized (missing NET_ADMIN)"
+# L1 Round 10 fix: Make firewall init failure FATAL — without the firewall,
+# the container has unrestricted network access, defeating the entire security model
+if ! /usr/local/bin/init-firewall.sh 2>/dev/null; then
+    log "[sandbox] FATAL: Firewall initialization failed"
+    log "[sandbox] Container cannot start without network restrictions"
+    exit 1
 fi
+log "[sandbox] Firewall initialized"
 
 # Write credentials from environment variable into .claude directory
 CREDS_FILE="/home/claude/.claude/.credentials.json"
@@ -126,7 +146,8 @@ EXPIRED=false
 if [ -f "$CREDS_FILE" ]; then
     EXPIRES_AT=$(jq -r '.claudeAiOauth.expiresAt // 0' "$CREDS_FILE" 2>/dev/null || echo 0)
     NOW_MS=$(($(date +%s) * 1000))
-    if [ "$EXPIRES_AT" -le "$NOW_MS" ] && [ "$EXPIRES_AT" -ne 0 ]; then
+    # M10 Round 10 fix: Validate expiresAt is numeric to prevent crash under set -e
+    if [[ "$EXPIRES_AT" =~ ^[0-9]+$ ]] && [ "$EXPIRES_AT" -le "$NOW_MS" ] && [ "$EXPIRES_AT" -ne 0 ]; then
         EXPIRED=true
         log "[sandbox] Existing credentials expired"
     fi
@@ -198,12 +219,17 @@ export GIT_CONFIG_GLOBAL="$GITCONFIG"
 # Sanitize workspace .git/config: strip dangerous keys that could execute code
 # on the host after container exit. Use wrapped-git directly (root is exempt
 # from git-guard) with -f to target only the repo-local config.
+# M1 & H9 Round 10 fix: Expand to cover ALL git-guard blocked keys
 if [ -f /workspace/.git/config ]; then
-    for key in core.fsmonitor core.sshCommand include.path; do
+    # Unset exact-match keys
+    for key in core.fsmonitor core.sshCommand core.hooksPath core.pager core.editor \
+               core.gitProxy core.askPass credential.helper include.path; do
         /usr/libexec/wrapped-git config -f /workspace/.git/config --unset-all "$key" 2>/dev/null || true
     done
-    /usr/libexec/wrapped-git config -f /workspace/.git/config --remove-section alias 2>/dev/null || true
-    /usr/libexec/wrapped-git config -f /workspace/.git/config --remove-section include 2>/dev/null || true
+    # Remove entire sections (H3 Round 10 additions)
+    for section in alias include filter url http remote credential diff merge; do
+        /usr/libexec/wrapped-git config -f /workspace/.git/config --remove-section "$section" 2>/dev/null || true
+    done
     # Remove all [includeIf "..."] sections. git stores these with quoted subsections
     # (e.g., [includeIf "gitdir:/path/"]) so --remove-section includeIf silently fails
     # (no bare [includeIf] section exists). Use awk to strip them from the raw file.
@@ -215,7 +241,10 @@ if [ -f /workspace/.git/config ]; then
     fi
     # Write post-sanitization hash so the host can compare against a clean baseline
     # (not the pre-sanitization snapshot). Written next to the entrypoint log mount.
+    # M8 Round 10 fix: Make hash file immutable after creation to prevent tampering
     sha256sum /workspace/.git/config 2>/dev/null | cut -d' ' -f1 > /run/git-config-hash || true
+    chmod 444 /run/git-config-hash 2>/dev/null || true
+    chown root:root /run/git-config-hash 2>/dev/null || true
 fi
 
 # Note: core.hooksPath and credential.helper are enforced by the git wrapper
@@ -289,7 +318,8 @@ export SHELL=/bin/bash
 export PATH="/home/claude/.local/bin:$PATH"
 
 # Disable core dumps to prevent secrets leaking via crash dumps to /workspace
-ulimit -c 0
+# L2 Round 10 fix: Set both hard and soft limits to prevent re-enabling
+ulimit -Hc 0 2>/dev/null; ulimit -Sc 0
 
 # Disable error reporting — sentry.io is removed from the firewall allowlist
 # because it accepts arbitrary POST data (exfiltration channel). This env var
@@ -324,7 +354,8 @@ if [ "${SYNC_BACK:-}" = "1" ]; then
     "${SETPRIV_CMD[@]}" &
     CHILD_PID=$!
     # Forward signals to child
-    trap 'kill -TERM $CHILD_PID 2>/dev/null' TERM
+    # M11 Round 10 fix: Wait for child after TERM to prevent sync-back race
+    trap 'kill -TERM $CHILD_PID 2>/dev/null; wait $CHILD_PID 2>/dev/null' TERM
     trap 'kill -INT $CHILD_PID 2>/dev/null' INT
     wait $CHILD_PID
     EXIT_CODE=$?

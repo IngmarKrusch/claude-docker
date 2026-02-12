@@ -5,6 +5,12 @@ set -e
 LAUNCH_LOG=""
 log() { echo "$1"; LAUNCH_LOG+="$1"$'\n'; }
 
+# M9 Round 10 fix: Sanitize ANSI escape sequences to prevent terminal injection
+# Removes CSI sequences (ESC[...X), OSC sequences (ESC]...BEL), and bare escapes
+sanitize_ansi() {
+    LC_ALL=C sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[^[]\{0,2\}//g'
+}
+
 usage() {
     cat <<'EOF'
 Usage: run-claude.sh [OPTIONS] [PROJECT_DIR] [CLAUDE_ARGS...]
@@ -185,7 +191,8 @@ print(creds.get('claudeAiOauth', {}).get('expiresAt', 0))
 NOW_MS=$(( $(date +%s) * 1000 ))
 BUFFER_MS=300000  # 5 minutes
 
-if [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT" -le $((NOW_MS + BUFFER_MS)) ]; then
+# M10 Round 10 fix: Validate expiresAt is numeric to prevent crash under set -e
+if [[ "$EXPIRES_AT" =~ ^[0-9]+$ ]] && [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT" -le $((NOW_MS + BUFFER_MS)) ]; then
     log "[sandbox] Keychain access token expired, refreshing via host claude..."
     if timeout 30 claude -p "." --max-turns 1 > /dev/null 2>&1; then
         # Re-extract refreshed credentials
@@ -202,6 +209,11 @@ fi
 
 # Extract GitHub token from host (for git push inside container)
 GH_TOKEN=$(gh auth token 2>/dev/null || true)
+# L3 Round 10 fix: Reject error text from gh auth token — valid tokens are
+# single words without whitespace; error messages contain spaces/newlines
+if [ -n "$GH_TOKEN" ] && [[ "$GH_TOKEN" =~ [[:space:]] ]]; then
+    GH_TOKEN=""
+fi
 if [ -n "$GH_TOKEN" ]; then
     case "$GH_TOKEN" in
         github_pat_*) log "[sandbox] Fine-grained GitHub token (good)" ;;
@@ -335,6 +347,23 @@ GIT_CONFIG_HASH_PRE=$(shasum -a 256 "$PROJECT_DIR/.git/config" 2>/dev/null | cut
 GIT_CONFIG_HASH_FILE=$(mktemp)
 HOOKS_LISTING=$(ls -la "$PROJECT_DIR/.git/hooks/" 2>/dev/null || true)
 
+# H7 Round 10 fix: Snapshot suspect files for modification-based post-exit audit
+# (avoids false positives on pre-existing files that weren't changed)
+SUSPECT_FILES=".envrc .vscode/settings.json .vscode/tasks.json Makefile .gitattributes .gitmodules .github/workflows"
+PRE_SUSPECT=""
+for _sf in $SUSPECT_FILES; do
+    if [ -e "$PROJECT_DIR/$_sf" ]; then
+        if [ -f "$PROJECT_DIR/$_sf" ]; then
+            _h=$(shasum -a 256 "$PROJECT_DIR/$_sf" 2>/dev/null | cut -d' ' -f1)
+        elif [ -d "$PROJECT_DIR/$_sf" ]; then
+            _h="DIR:$(find "$PROJECT_DIR/$_sf" -type f -exec shasum -a 256 {} \; 2>/dev/null | sort | shasum -a 256 | cut -d' ' -f1)"
+        else
+            _h="other"
+        fi
+        PRE_SUSPECT+="$_sf=$_h"$'\n'
+    fi
+done
+
 ENTRYPOINT_LOG=$(mktemp)
 
 # L1 fix: clean up all tempfiles on signal/early-exit
@@ -343,6 +372,12 @@ trap _cleanup_temps EXIT
 
 # Delete env file shortly after docker reads it (minimizes on-disk exposure)
 (sleep 2 && rm -f "$ENVFILE") &
+
+# M4 Round 10 fix: Only mount ~/.gitconfig if it exists
+GITCONFIG_MOUNT=""
+if [ -f "$HOME/.gitconfig" ]; then
+    GITCONFIG_MOUNT="-v $HOME/.gitconfig:/tmp/host-gitconfig:ro"
+fi
 
 set +e
 # shellcheck disable=SC2086
@@ -359,6 +394,8 @@ docker run --rm -it \
     --security-opt=no-new-privileges \
     --security-opt seccomp="$SCRIPT_DIR/seccomp-profile.json" \
     --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+    --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+    --sysctl net.ipv6.conf.default.disable_ipv6=1 \
     --pids-limit=4096 \
     --memory=8g \
     --memory-swap=8g \
@@ -369,22 +406,22 @@ docker run --rm -it \
     --env-file "$ENVFILE" \
     --shm-size=64m \
     -v "$PROJECT_DIR":/workspace \
-    -v "$HOME/.gitconfig":/tmp/host-gitconfig:ro \
+    $GITCONFIG_MOUNT \
     -v "$SCRIPT_DIR/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
     $CLAUDE_MOUNT_FLAGS \
     $SYNC_BACK_FLAGS \
     -v "$ENTRYPOINT_LOG":/run/entrypoint.log \
     -v "$GIT_CONFIG_HASH_FILE":/run/git-config-hash \
     -e ENTRYPOINT_LOG=/run/entrypoint.log \
+    -e PROJECT_PATH="$PROJECT_DIR" \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
 DOCKER_EXIT=$?
 set -e
 
 if [ -f "$ENTRYPOINT_LOG" ] && [ -s "$ENTRYPOINT_LOG" ]; then
-    # Strip ANSI escape sequences to prevent terminal injection from container output.
-    # Removes CSI sequences (ESC[...X), OSC sequences (ESC]...BEL), and bare escapes.
-    LAUNCH_LOG+="$(LC_ALL=C sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[^[]\{0,2\}//g' "$ENTRYPOINT_LOG")"$'\n'
+    # M9 Round 10 fix: Use centralized ANSI sanitization function
+    LAUNCH_LOG+="$(sanitize_ansi < "$ENTRYPOINT_LOG")"$'\n'
 fi
 rm -f "$ENTRYPOINT_LOG" 2>/dev/null || true
 
@@ -399,10 +436,16 @@ if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
     fi
 
     echo "[sandbox] Syncing session data back to host..."
+    # H6 Round 10 fix: Align exclusions with entrypoint-side rsync
     rsync -a --no-links \
         --exclude='settings.json' \
         --exclude='settings.local.json' \
+        --exclude='statusline-command.sh' \
         --exclude='CLAUDE.md' \
+        --exclude='.credentials.json' \
+        --exclude='.gitconfig' \
+        --exclude='entrypoint.log' \
+        --exclude='.history-baseline-lines' \
         "$HOME/.claude/.sync-back/data/" "$HOME/.claude/"
     echo "[sandbox] Sync complete"
 fi
@@ -429,14 +472,23 @@ if [ -n "$ENTRYPOINT_HASH" ]; then
         echo ""
         echo "[sandbox] WARNING: .git/config was modified during the session!"
         echo "[sandbox] Auto-restoring from pre-session backup and re-sanitizing..."
+        # H7 Round 10 fix: Check if .git/config is a symlink before copying.
+        # Prevents arbitrary host file overwrite via symlink attack.
+        if [ -L "$PROJECT_DIR/.git/config" ]; then
+            echo "[sandbox] DANGER: .git/config is a symlink — removing it"
+            rm -f "$PROJECT_DIR/.git/config"
+        fi
         cp "$GIT_CONFIG_BACKUP" "$PROJECT_DIR/.git/config"
         # Re-apply the same sanitization the entrypoint performed, so we don't
         # restore dangerous keys that were in the original config.
-        for _key in core.fsmonitor core.sshCommand include.path; do
+        # Updated to match entrypoint M1 & H9 fixes
+        for _key in core.fsmonitor core.sshCommand core.hooksPath core.pager core.editor \
+                    core.gitProxy core.askPass credential.helper include.path; do
             git config -f "$PROJECT_DIR/.git/config" --unset-all "$_key" 2>/dev/null || true
         done
-        git config -f "$PROJECT_DIR/.git/config" --remove-section alias 2>/dev/null || true
-        git config -f "$PROJECT_DIR/.git/config" --remove-section include 2>/dev/null || true
+        for _section in alias include filter url http remote credential diff merge; do
+            git config -f "$PROJECT_DIR/.git/config" --remove-section "$_section" 2>/dev/null || true
+        done
         # Remove all [includeIf "..."] sections (--remove-section can't match these;
         # see entrypoint.sh comment for details)
         if grep -q '^\[includeIf ' "$PROJECT_DIR/.git/config" 2>/dev/null; then
@@ -452,6 +504,11 @@ elif [ -n "$GIT_CONFIG_HASH_PRE" ] && [ "$GIT_CONFIG_HASH_PRE" != "$POST_GIT_CON
     echo ""
     echo "[sandbox] WARNING: .git/config was modified during the session!"
     echo "[sandbox] Auto-restoring .git/config from pre-session backup..."
+    # H7 Round 10 fix: Check for symlink before restore
+    if [ -L "$PROJECT_DIR/.git/config" ]; then
+        echo "[sandbox] DANGER: .git/config is a symlink — removing it"
+        rm -f "$PROJECT_DIR/.git/config"
+    fi
     cp "$GIT_CONFIG_BACKUP" "$PROJECT_DIR/.git/config"
     echo "[sandbox] .git/config restored. Review with: git config --local --list"
 fi
@@ -464,7 +521,8 @@ if [ "$HOOKS_LISTING" != "$POST_HOOKS_LISTING" ]; then
     for hook in "$PROJECT_DIR/.git/hooks/"*; do
         [ -f "$hook" ] || continue
         case "$hook" in *.sample) continue ;; esac
-        NEW_HOOKS+="  - $hook"$'\n'
+        # M9 Round 10 fix: Sanitize hook paths before output (filenames can contain ANSI escapes)
+        NEW_HOOKS+="  - $(echo "$hook" | sanitize_ansi)"$'\n'
     done
     if [ -n "$NEW_HOOKS" ]; then
         echo ""
@@ -474,15 +532,18 @@ if [ "$HOOKS_LISTING" != "$POST_HOOKS_LISTING" ]; then
 fi
 
 # 3. Scan .git/config for dangerous keys as final check
+# H8 & H9 Round 10 fix: Expand scan to cover ALL git-guard blocked keys
 if [ -f "$PROJECT_DIR/.git/config" ]; then
     GIT_CONFIG_WARNINGS=""
-    for key in core.fsmonitor core.sshCommand core.hooksPath include.path; do
+    # Exact match keys
+    for key in core.fsmonitor core.sshCommand core.hooksPath core.pager core.editor \
+               core.gitProxy core.askPass credential.helper include.path; do
         if git config -f "$PROJECT_DIR/.git/config" --get-all "$key" >/dev/null 2>&1; then
             GIT_CONFIG_WARNINGS+="  - $key"$'\n'
         fi
     done
-    # Check for alias and includeIf sections
-    for section in alias includeIf; do
+    # Section/prefix-based keys (H3 Round 10 additions)
+    for section in alias includeIf filter url http remote credential diff merge; do
         if git config -f "$PROJECT_DIR/.git/config" --get-regexp "^${section}\." >/dev/null 2>&1; then
             GIT_CONFIG_WARNINGS+="  - ${section}.* section"$'\n'
         fi
@@ -490,30 +551,40 @@ if [ -f "$PROJECT_DIR/.git/config" ]; then
     if [ -n "$GIT_CONFIG_WARNINGS" ]; then
         echo ""
         echo "[sandbox] WARNING: Dangerous keys found in .git/config:"
-        printf '%s' "$GIT_CONFIG_WARNINGS"
+        # M9 Round 10 fix: Sanitize output to prevent ANSI injection
+        printf '%s' "$GIT_CONFIG_WARNINGS" | sanitize_ansi
         echo "[sandbox] Review with: git config --local --list"
     fi
 fi
 
-# 4. Suspect file existence warnings
+# 4. Suspect file modification/creation warnings
+# H7 Round 10 fix: Modification-based detection avoids false positives on
+# pre-existing files (e.g., Makefile that wasn't changed during the session)
 AUDIT_WARNINGS=""
-for suspect in \
-    "$PROJECT_DIR/.envrc" \
-    "$PROJECT_DIR/.vscode/settings.json" \
-    "$PROJECT_DIR/.vscode/tasks.json" \
-    "$PROJECT_DIR/Makefile" \
-    "$PROJECT_DIR/.gitattributes" \
-    "$PROJECT_DIR/.github/workflows"; do
-    if [ -e "$suspect" ]; then
-        AUDIT_WARNINGS+="  - $suspect"$'\n'
+for _sf in $SUSPECT_FILES; do
+    _full="$PROJECT_DIR/$_sf"
+    if [ -e "$_full" ]; then
+        if [ -f "$_full" ]; then
+            _post_h=$(shasum -a 256 "$_full" 2>/dev/null | cut -d' ' -f1)
+        elif [ -d "$_full" ]; then
+            _post_h="DIR:$(find "$_full" -type f -exec shasum -a 256 {} \; 2>/dev/null | sort | shasum -a 256 | cut -d' ' -f1)"
+        else
+            _post_h="other"
+        fi
+        _pre_h=$(printf '%s\n' "$PRE_SUSPECT" | grep -F "$_sf=" | head -1 | cut -d= -f2-)
+        if [ -z "$_pre_h" ]; then
+            AUDIT_WARNINGS+="  - $(echo "$_full" | sanitize_ansi) [CREATED]"$'\n'
+        elif [ "$_pre_h" != "$_post_h" ]; then
+            AUDIT_WARNINGS+="  - $(echo "$_full" | sanitize_ansi) [MODIFIED]"$'\n'
+        fi
     fi
 done
 if [ -n "$AUDIT_WARNINGS" ]; then
     echo ""
-    echo "[sandbox] WARNING: The following workspace files can execute code outside the sandbox."
-    echo "[sandbox] Review these for unexpected changes before running build/IDE tools:"
+    echo "[sandbox] WARNING: The following workspace files were created or modified during this session."
+    echo "[sandbox] These files can execute code outside the sandbox — review before running build/IDE tools:"
     printf '%s' "$AUDIT_WARNINGS"
-    echo "[sandbox] Use 'git diff' to inspect changes made during this session."
+    echo "[sandbox] Use 'git diff' to inspect changes."
 fi
 
 if [ -n "$LAUNCH_LOG" ]; then

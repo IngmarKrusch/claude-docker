@@ -152,7 +152,7 @@
       "names": ["clone"],
       "action": "SCMP_ACT_ALLOW",
       "args": [
-        { "index": 0, "value": 2114060288, "op": "SCMP_CMP_MASKED_EQ", "valueTwo": 0 }
+        { "index": 0, "value": 2114060416, "op": "SCMP_CMP_MASKED_EQ", "valueTwo": 0 }
       ],
       "excludes": { "caps": ["CAP_SYS_ADMIN"], "arches": ["s390", "s390x"] }
     },
@@ -161,7 +161,7 @@
       "names": ["clone"],
       "action": "SCMP_ACT_ALLOW",
       "args": [
-        { "index": 1, "value": 2114060288, "op": "SCMP_CMP_MASKED_EQ", "valueTwo": 0 }
+        { "index": 1, "value": 2114060416, "op": "SCMP_CMP_MASKED_EQ", "valueTwo": 0 }
       ],
       "includes": { "arches": ["s390", "s390x"] },
       "excludes": { "caps": ["CAP_SYS_ADMIN"] }

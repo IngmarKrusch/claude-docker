@@ -39,16 +39,29 @@ static void block(const char *msg) {
 
 static int is_blocked_config_key(const char *key) {
     /* Git config keys are case-insensitive for section and key name parts.
-     * Use strcasecmp/strncasecmp throughout (H1 fix). */
+     * Use strcasecmp/strncasecmp throughout for case-insensitive matching. */
     static const char *exact[] = {
         "core.fsmonitor", "core.sshCommand", "core.pager",
         "core.editor", "core.hooksPath", "credential.helper",
-        "include.path", NULL
+        "include.path", "core.gitProxy", "core.askPass", NULL
     };
     for (int i = 0; exact[i]; i++) {
         if (strcasecmp(key, exact[i]) == 0)
             return 1;
     }
+    /* H3 Round 10 fix: Block entire config sections that enable code execution */
+    /* url.* — URL rewriting can redirect to attacker servers */
+    if (strncasecmp(key, "url.", 4) == 0)
+        return 1;
+    /* http.* — proxy settings, SSL verification bypass */
+    if (strncasecmp(key, "http.", 5) == 0)
+        return 1;
+    /* remote.* — remote URL manipulation */
+    if (strncasecmp(key, "remote.", 7) == 0)
+        return 1;
+    /* credential.* — catch all forms (credential.helper, credential.<url>.helper, etc.) */
+    if (strncasecmp(key, "credential.", 11) == 0)
+        return 1;
     /* filter.* — any key starting with "filter." */
     if (strncasecmp(key, "filter.", 7) == 0)
         return 1;
@@ -102,6 +115,19 @@ static void git_guard_init(void) {
     /* Root is trusted (entrypoint init code) */
     if (getuid() == 0) return;
 
+    /* H4 Round 10 fix: Clear dangerous git environment variables that can override
+     * our forced config or execute code. Must be done BEFORE setting GIT_CONFIG_COUNT
+     * so we don't accidentally unset our own forced values. */
+    unsetenv("GIT_EXTERNAL_DIFF");
+    unsetenv("GIT_SSH");
+    unsetenv("GIT_SSH_COMMAND");
+    unsetenv("GIT_ASKPASS");
+    unsetenv("GIT_EDITOR");
+    unsetenv("GIT_EXEC_PATH");
+    unsetenv("GIT_TEMPLATE_DIR");
+    unsetenv("GIT_CONFIG_SYSTEM");
+    unsetenv("GIT_PROXY_COMMAND");
+
     /* Force security-critical git config via environment.
      * GIT_CONFIG_COUNT overrides local/global gitconfig, preventing
      * bypass via .git/config or GIT_CONFIG_GLOBAL. */
@@ -139,6 +165,10 @@ static void git_guard_init(void) {
         p += strlen(p) + 1;
     }
     argv[argc] = NULL;
+    /* L10 Round 10 fix: Block if args were truncated — attacker could push
+     * blocked keys past the parsing boundary */
+    if (p < end)
+        block("too many arguments for sandbox validation");
     if (argc < 2) return;
 
     /* Skip global flags before the subcommand, inspecting -c and --config-env
@@ -152,6 +182,11 @@ static void git_guard_init(void) {
                 block("git -c with blocked config key is disabled "
                       "in the sandbox");
             sub_idx++; /* skip value */
+        } else if (strncmp(argv[sub_idx], "-c", 2) == 0 && argv[sub_idx][2] != '\0') {
+            /* C1 Round 10 fix: -ckey=value (concatenated form, no space) */
+            if (check_config_arg(argv[sub_idx] + 2))
+                block("git -c with blocked config key is disabled "
+                      "in the sandbox");
         } else if (strcmp(argv[sub_idx], "--config-env") == 0) {
             /* --config-env key=envvar: inspect for blocked keys */
             if (sub_idx + 1 < argc && check_config_arg(argv[sub_idx + 1]))
@@ -202,13 +237,15 @@ static void git_guard_init(void) {
         for (int i = sub_idx + 1; i < argc; i++) {
             if (argv[i][0] == '-') {
                 /* H2 fix: recognize flags that take a value argument and skip
-                 * their values, so the value isn't mistaken for the config key */
+                 * their values, so the value isn't mistaken for the config key.
+                 * C2 Round 10 fix: removed --fixed-value (it's a boolean flag,
+                 * not a value-taking flag, so including it caused the actual
+                 * config key to be skipped during parsing). */
                 if (strcmp(argv[i], "--file") == 0 ||
                     strcmp(argv[i], "-f") == 0 ||
                     strcmp(argv[i], "--blob") == 0 ||
                     strcmp(argv[i], "--type") == 0 ||
-                    strcmp(argv[i], "--default") == 0 ||
-                    strcmp(argv[i], "--fixed-value") == 0) {
+                    strcmp(argv[i], "--default") == 0) {
                     i++; /* skip flag's value */
                 }
                 continue;
