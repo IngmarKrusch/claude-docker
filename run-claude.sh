@@ -347,6 +347,23 @@ GIT_CONFIG_HASH_PRE=$(shasum -a 256 "$PROJECT_DIR/.git/config" 2>/dev/null | cut
 GIT_CONFIG_HASH_FILE=$(mktemp)
 HOOKS_LISTING=$(ls -la "$PROJECT_DIR/.git/hooks/" 2>/dev/null || true)
 
+# Snapshot pre-existing dangerous keys in .git/config for modification-based post-exit audit
+# (mirrors the suspect-file pattern — avoids false positives on pre-existing keys like remote.origin)
+PRE_GIT_CONFIG_KEYS=""
+if [ -f "$PROJECT_DIR/.git/config" ]; then
+    for key in core.fsmonitor core.sshCommand core.hooksPath core.pager core.editor \
+               core.gitProxy core.askPass credential.helper include.path; do
+        if git config -f "$PROJECT_DIR/.git/config" --get-all "$key" >/dev/null 2>&1; then
+            PRE_GIT_CONFIG_KEYS+="$key"$'\n'
+        fi
+    done
+    for section in alias includeIf filter url http remote credential diff merge; do
+        if git config -f "$PROJECT_DIR/.git/config" --get-regexp "^${section}\." >/dev/null 2>&1; then
+            PRE_GIT_CONFIG_KEYS+="${section}.*"$'\n'
+        fi
+    done
+fi
+
 # H7 Round 10 fix: Snapshot suspect files for modification-based post-exit audit
 # (avoids false positives on pre-existing files that weren't changed)
 SUSPECT_FILES=".envrc .vscode/settings.json .vscode/tasks.json Makefile .gitattributes .gitmodules .github/workflows"
@@ -532,19 +549,23 @@ if [ "$HOOKS_LISTING" != "$POST_HOOKS_LISTING" ]; then
     fi
 fi
 
-# 3. Scan .git/config for dangerous keys as final check
+# 3. Scan .git/config for dangerous keys — only warn about NEW keys (not pre-existing)
 # H8 & H9 Round 10 fix: Expand scan to cover ALL git-guard blocked keys
 if [ -f "$PROJECT_DIR/.git/config" ]; then
     GIT_CONFIG_WARNINGS=""
     # Exact match keys
     for key in core.fsmonitor core.sshCommand core.hooksPath core.pager core.editor \
                core.gitProxy core.askPass credential.helper include.path; do
+        # Skip if key existed before the session
+        printf '%s' "$PRE_GIT_CONFIG_KEYS" | grep -qxF "$key" && continue
         if git config -f "$PROJECT_DIR/.git/config" --get-all "$key" >/dev/null 2>&1; then
             GIT_CONFIG_WARNINGS+="  - $key"$'\n'
         fi
     done
     # Section/prefix-based keys (H3 Round 10 additions)
     for section in alias includeIf filter url http remote credential diff merge; do
+        # Skip if section existed before the session
+        printf '%s' "$PRE_GIT_CONFIG_KEYS" | grep -qxF "${section}.*" && continue
         if git config -f "$PROJECT_DIR/.git/config" --get-regexp "^${section}\." >/dev/null 2>&1; then
             GIT_CONFIG_WARNINGS+="  - ${section}.* section"$'\n'
         fi
