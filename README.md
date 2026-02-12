@@ -49,7 +49,7 @@ Each hardening layer below addresses one or more of these threats. Layers are de
 | What | Why |
 |------|-----|
 | Read-only rootfs (`--read-only`) | Prevents modifying system binaries, config, or security libraries (`/etc/ld.so.preload`) |
-| Custom seccomp profile | Blocks io_uring, userfaultfd, personality, ptrace, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret. AF_VSOCK blocked (VM escape vector) |
+| Custom seccomp profile | Blocks io_uring, userfaultfd, personality, ptrace, process_vm_readv/writev, perf_event_open, memfd_create/memfd_secret. AF_VSOCK blocked (VM escape vector). Clone namespace flags blocked (CLONE_NEWNS/NEWUTS/NEWIPC/NEWUSER/NEWPID/NEWNET/NEWCGROUP/NEWTIME) |
 | All capabilities dropped | Only CHOWN/SETUID/SETGID/SETPCAP (entrypoint setup) and NET_ADMIN/NET_RAW (firewall) retained at launch; bounding set cleared to empty after init |
 | `no-new-privileges` | Prevents gaining capabilities via setuid binaries or ambient caps |
 | `--init` (tini as PID 1) | Proper signal handling and zombie reaping. PID 1 is root-owned so the AI can't read `/proc/1/mem` |
@@ -65,13 +65,16 @@ Outbound traffic is restricted to an allowlist of resolved IPs via iptables + ip
 
 | Rule | Purpose |
 |------|---------|
+| **IPv6 completely disabled** | Kernel sysctls `net.ipv6.conf.all.disable_ipv6=1` and `net.ipv6.conf.default.disable_ipv6=1` prevent IPv6 firewall bypass |
 | IP allowlist (`firewall-allowlist.conf`) | Only resolved IPs from configured domains are reachable (Anthropic API, GitHub, npm registry) |
+| **Port restriction: TCP 443/80 only** | ipset rules restrict allowlisted domains to HTTPS (443) and HTTP (80) — prevents exfiltration via non-standard ports |
 | DNS pinned to container resolver | All DNS goes through the internal resolver; direct external DNS blocked |
 | DNS rate limit: 1 query/sec, burst 2 | Anti-tunneling — limits DNS exfiltration to ~25 B/s (sufficient for npm/git/curl, impractical for bulk data) |
 | DNS packet size cap: 192 bytes | Drops oversized UDP DNS packets (normal queries are <128 bytes; large packets indicate tunneling payloads) |
 | SSH (port 22) blocked | Prevents raw TCP exfiltration via `github.com:22` (accepts connections without auth) |
 | Removed domains | `sentry.io` (arbitrary POST data), `statsig.com`/`statsig.anthropic.com` (arbitrary POST data), VS Code marketplace/blob/update domains (Azure CDN shared IPs — domain fronting risk) |
 | `DISABLE_ERROR_REPORTING=1` | Prevents Claude Code from attempting error reports even if allowlist is accidentally widened |
+| **Firewall init failure is fatal** | Container exits if firewall initialization fails — cannot start without network restrictions in place |
 | Firewall verification | Init verifies a blocked site (`example.com`) is unreachable and an allowed site (`api.github.com`) works as root; also verifies the claude user can reach allowed sites through DNS rate limiting |
 
 #### Git operations
@@ -83,9 +86,14 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
 - `git push` blocked unless `/run/sandbox-flags/allow-git-push` exists (root-created flag file)
 - `git remote add/set-url/rename` blocked (prevents adding exfiltration targets)
 - `git submodule add` blocked (prevents pulling arbitrary repos)
-- `git config` with dangerous keys blocked: `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`, `credential.helper`, `include.path`, `filter.*`, `alias.*`, `includeIf.*.path`, `diff.<driver>.textconv`, `diff.<driver>.command`, `merge.<driver>.driver`
-- `git -c` and `git --config-env` with blocked keys rejected (prevents flag-level config override)
+- **`git config` with dangerous keys blocked** (comprehensive list covering all documented git escape vectors):
+  - **Exact keys:** `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`, `credential.helper`, `include.path`, `core.gitProxy`, `core.askPass`
+  - **Prefix-based blocking:** `url.*` (URL rewriting), `http.*` (proxy/SSL bypass), `remote.*` (remote manipulation), `credential.*` (all credential helper forms), `filter.*`, `alias.*`, `diff.*`, `merge.*`
+  - **Complex patterns:** `includeIf.*.path` (conditional includes)
+- **`git -c` and `git --config-env` with blocked keys rejected** — detects both separated (`-c key=value`) and concatenated (`-ckey=value`) forms to prevent flag-level config override
+- **Dangerous git environment variables cleared** on every invocation: `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_SYSTEM`, `GIT_PROXY_COMMAND`
 - Command lines >=64KB rejected (prevents bypassing validation via truncation)
+- **Argument count overflow blocked** — if args exceed the 256-entry parsing buffer, execution is blocked (prevents pushing blocked keys past the validation boundary)
 - Forces `GIT_CONFIG_COUNT=4` environment overrides on every invocation:
   - `core.hooksPath=/dev/null` — neutralizes git hooks
   - `credential.helper=cache --timeout=86400 --socket=/tmp/.git-credential-cache/sock` — pins credential source
@@ -95,7 +103,7 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
 
 **Layer 2: `git-wrapper.sh`** (defense-in-depth) — a 16-line shell wrapper at `/usr/local/bin/git` that force-sets the same `GIT_CONFIG_COUNT` overrides and then execs `/usr/libexec/wrapped-git`. Provides coverage for the narrow case of statically-linked callers that bypass `ld.so.preload`.
 
-**Startup sanitization:** The entrypoint strips dangerous keys from the workspace `.git/config` at startup (`core.fsmonitor`, `core.sshCommand`, `include.path`, and entire `alias`/`include`/`includeIf` sections), then writes a post-sanitization SHA-256 hash for tamper detection.
+**Startup sanitization:** The entrypoint strips dangerous keys from the workspace `.git/config` at startup (all keys/sections listed above), then writes a post-sanitization SHA-256 hash for tamper detection.
 
 #### Credential protection
 
@@ -106,6 +114,8 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
 | GitHub token in memory only | Stored in `git credential-cache` daemon memory (never on disk). Cache socket on `/tmp` (tmpfs), gone when the container exits. `GITHUB_TOKEN` env var unset before the credential cache daemon starts (prevents leaking via `/proc/<pid>/environ`). |
 | Token scoped to workspace repo | `credential.https://github.com.useHttpPath=true` + token stored with the workspace repo path — won't serve the token for requests to other repos |
 | `--disallow-broad-gh-token` | Rejects `ghp_*` (classic) and `gho_*` (OAuth) tokens at launch. Only fine-grained PATs (`github_pat_*`) accepted. |
+| Token format validation | `gh auth token` output validated — strings containing whitespace (error messages) are rejected. GHES tokens with non-standard prefixes are accepted. |
+| Credential expiry validation | `expiresAt` field validated as numeric before comparison — prevents script crash on malformed credential data. |
 
 **Security limitation:** The AI agent runs as the same UID as git. Any mechanism that makes the token available to git (credential cache, env vars) also makes it extractable by the AI (e.g., via `net.connect` to the credential cache socket). This is a fundamental same-UID constraint. Fine-grained PATs scoped to the workspace repo limit blast radius.
 
@@ -115,7 +125,7 @@ The host's `~/.claude/` is mounted **read-only** at `/mnt/.claude-host` (root-on
 
 - `.config.json`, `settings.json`, `settings.local.json`, `CLAUDE.md` (read snapshots)
 - `history.jsonl` (for `--continue`/`--resume`)
-- Current project's `projects/<path>/` data (memory + transcripts)
+- Current project's `projects/<path>/` data (memory + transcripts) — **host project path** (`PROJECT_PATH`) is used for encoding to prevent cross-project data leakage (container's `/workspace` encoding is shared across all projects without this)
 - `statsig/`, `plugins/`, `stats-cache.json`
 
 | Attack | Protection |
@@ -123,12 +133,14 @@ The host's `~/.claude/` is mounted **read-only** at `/mnt/.claude-host` (root-on
 | **Settings escalation** — write `{"permissions":{"allow":["Bash(*)"]}}` to `settings.json` | Writes go to tmpfs; `settings.json` is never synced back to host |
 | **CLAUDE.md poisoning** — inject malicious instructions into user-level `~/.claude/CLAUDE.md` | Writes go to tmpfs; user-level `CLAUDE.md` is never synced back to host |
 | **Plugin injection** — modify host plugins for persistent compromise | Writes go to tmpfs; lost on exit (plugins do sync back by default) |
-| **Cross-project data leakage** — read other projects' memories, sessions, history | Host mount at root-only path (`/mnt/.claude-host`), inaccessible after init; only current project data copied |
+| **Cross-project data leakage** — read other projects' memories, sessions, history | Host mount at root-only path (`/mnt/.claude-host`), inaccessible after init; only current project data copied. `PROJECT_PATH` env var carries host-side path for per-project encoding — sync-back writes to project-specific directory, not shared `-workspace` |
 
-**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Sync-back uses `rsync --no-links` to prevent symlink planting attacks (all symlinks are silently skipped — both absolute and relative). Two files are **never** synced back regardless of settings:
+**Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Sync-back uses `rsync --no-links` to prevent symlink planting attacks (all symlinks are silently skipped — both absolute and relative). **Project data is relocated** from the container's generic `-workspace` encoding to the host's real project path encoding before sync, preventing cross-project leakage. Multiple files are **never** synced back regardless of settings:
 
 - `settings.json` / `settings.local.json` — prevents tool auto-approval escalation
+- `statusline-command.sh` — prevents command injection via status line
 - `CLAUDE.md` (user-level) — prevents persistent prompt injection
+- `.credentials.json`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines` — internal state files
 
 Use `--no-sync-back` to disable all sync-back. Project-level `/workspace/CLAUDE.md` is unaffected by this protection (writable via the workspace mount).
 
@@ -153,16 +165,16 @@ The entrypoint starts as root for setup (mount isolation, firewall, credentials,
 setpriv --reuid=501 --regid=20 --init-groups --inh-caps=-all --bounding-set=-all -- claude
 ```
 
-After this point: no capabilities in the bounding set, no inheritable caps, `no-new-privileges` prevents regaining them. No `sudo` exists in the image.
+After this point: no capabilities in the bounding set, no inheritable caps, `no-new-privileges` prevents regaining them. Core dumps disabled via both hard and soft ulimits (prevents re-enabling). No `sudo` exists in the image.
 
 #### Post-exit audit
 
 After the container exits, `run-claude.sh` performs a workspace audit on the host:
 
-1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline. If modified during the session, auto-restores from pre-session backup and re-applies sanitization (strips `core.fsmonitor`, `core.sshCommand`, `include.path`, `alias`/`include`/`includeIf` sections).
-2. **Hook detection** — scans `.git/hooks/` for new non-`.sample` files added during the session.
-3. **Dangerous config key scan** — checks `.git/config` for `core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, `include.path`, `alias.*`, `includeIf.*` as a final safety net.
-4. **Suspect file warnings** — flags workspace files that can execute code outside the sandbox: `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.github/workflows`.
+1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline (immutable root-owned file, prevents tampering). If modified during the session, **checks for symlink attacks** (prevents arbitrary host file overwrite), then auto-restores from pre-session backup and re-applies sanitization (strips all git-guard blocked keys/sections).
+2. **Hook detection** — scans `.git/hooks/` for new non-`.sample` files added during the session. Output is **sanitized for ANSI escape sequences** to prevent terminal injection via crafted filenames.
+3. **Dangerous config key scan** — checks `.git/config` for **all git-guard blocked keys** (exact keys, prefix-based sections like `url.*`, `http.*`, `remote.*`, `credential.*`, `filter.*`, `alias.*`, `diff.*`, `merge.*`, `includeIf.*`) as a final safety net.
+4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox: `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`. Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
 
 ### What we tried and removed
 
@@ -184,6 +196,7 @@ Honest disclosure of defenses that were found ineffective and replaced or remove
 | Severity | Issue | Mitigation |
 |----------|-------|-----------|
 | **HIGH** | **GitHub token extractable** — AI runs as same UID as git; can `net.connect` to credential cache socket | Use [fine-grained PATs](https://github.com/settings/personal-access-tokens/new) scoped to workspace repo. `--disallow-broad-gh-token` rejects classic/OAuth tokens. |
+| **HIGH** | **API endpoint exfiltration** (accepted risk) — `api.anthropic.com` accepts 200K tokens/request (~800KB), `api.github.com` accepts gists/issues/repos, `registry.npmjs.org` accepts `npm publish` | Inherent to Claude Code operation — cannot function without API access. Mitigations: fine-grained GitHub PATs, session transcript review, `git diff` after sessions. |
 | **MEDIUM** | **Workspace write-back** — `/workspace` is writable; session could plant `.envrc`, hooks, CI configs that execute on host | Post-exit audit warns about dangerous files. Review `git diff` after sessions. |
 | **LOW** | **DNS tunneling** — ~25 B/s at 1 query/sec with 192-byte packet cap | Impractical for bulk exfiltration. Rate limiting + size cap reduce throughput to levels unsuitable for code/credential theft. |
 | **LOW** | **History readable** — container receives host `history.jsonl` for `--continue` | DNS rate limiting makes exfiltration impractical (~25 B/s). |
@@ -358,22 +371,22 @@ Then: `dclaude ~/Projects/my-project` or `dclaude --rebuild ~/Projects/my-projec
 
 ### Entrypoint lifecycle
 
-1. **Mount isolation** — copy session data from read-only host mount (`/mnt/.claude-host`) to writable tmpfs (`~/.claude`)
+1. **Mount isolation** — copy session data from read-only host mount (`/mnt/.claude-host`) to writable tmpfs (`~/.claude`). Uses `cp -P` (no symlink dereferencing). Project data loaded using host-side `PROJECT_PATH` encoding for per-project isolation.
 2. **Push flag** — create `/run/sandbox-flags/allow-git-push` if `--allow-git-push` was passed (root-owned, immutable after privilege drop)
-3. **Firewall** — initialize iptables allowlist, DNS rate limiting, SSH blocking, connectivity verification
+3. **Firewall** — initialize iptables allowlist, IPv6 disable, port restrictions (443/80), DNS rate limiting, SSH blocking, connectivity verification. **Firewall init failure is fatal** — container exits if network restrictions cannot be established.
 4. **Credentials** — write OAuth tokens to file, schedule background scrub (urandom overwrite + delete after 1s)
-5. **Git config** — build global gitconfig from host, strip host credential helpers, set `core.hooksPath=/dev/null`
-6. **Git config sanitization** — strip dangerous keys from workspace `.git/config` (`core.fsmonitor`, `core.sshCommand`, `include.path`, `alias`/`include`/`includeIf` sections), write post-sanitization SHA-256 hash
+5. **Git config** — build global gitconfig from host (`~/.gitconfig` mount guarded — only mounted if file exists on host), strip host credential helpers, set `core.hooksPath=/dev/null`
+6. **Git config sanitization** — strip dangerous keys from workspace `.git/config` (all git-guard blocked keys/sections), write post-sanitization SHA-256 hash to **immutable root-owned file** (`chmod 444`, prevents tampering with tamper detection baseline)
 7. **GitHub credentials** — feed token into `git credential-cache` (memory-only), scoped to workspace repo via `useHttpPath`
-8. **Privilege drop** — `setpriv` to UID 501 with empty bounding set and no inheritable capabilities
+8. **Privilege drop** — `setpriv` to UID 501 with empty bounding set and no inheritable capabilities. When sync-back is enabled, child process is waited on SIGTERM to prevent sync-back racing with still-running child.
 
 ### Post-exit lifecycle
 
-1. **Sync-back** — rsync session artifacts from container staging dir to host `~/.claude/` (if enabled). Uses `--no-links` (skips all symlinks). Excludes `settings.json`, `settings.local.json`, `CLAUDE.md`.
-2. **`.git/config` tamper detection** — compare SHA-256 hash against post-sanitization baseline; auto-restore from pre-session backup if modified
-3. **Hook detection** — warn about new non-`.sample` files in `.git/hooks/`
-4. **Dangerous config scan** — check `.git/config` for `core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, `include.path`, `alias.*`, `includeIf.*`
-5. **Suspect file warnings** — flag `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.github/workflows`
+1. **Sync-back** — rsync session artifacts from container staging dir to host `~/.claude/` (if enabled). Uses `--no-links` (skips all symlinks). Project data relocated from `-workspace` to host-encoded path before sync. Excludes `settings.json`, `settings.local.json`, `statusline-command.sh`, `CLAUDE.md`, `.credentials.json`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines`.
+2. **`.git/config` tamper detection** — compare SHA-256 hash against immutable post-sanitization baseline; **check for symlink attacks** before restore (prevents arbitrary host file overwrite); auto-restore from pre-session backup and re-apply full sanitization if modified
+3. **Hook detection** — warn about new non-`.sample` files in `.git/hooks/`. **ANSI escape sequences sanitized** to prevent terminal injection.
+4. **Dangerous config scan** — check `.git/config` for **all git-guard blocked keys** (comprehensive coverage of exact keys and prefix-based sections)
+5. **Suspect file warnings** — detect `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows` that were **created or modified** during the session (pre/post SHA-256 comparison). **ANSI escape sequences sanitized**.
 
 ### Persistent state
 
@@ -419,9 +432,9 @@ If auto-refresh fails or you see auth errors mid-session:
    ./run-claude.sh --fresh-creds ~/Projects/my-project
    ```
 
-### "Firewall not initialized" warning
+### "FATAL: Firewall initialization failed"
 
-The iptables firewall requires NET_ADMIN capability. If you see this warning, check that `--cap-add=NET_ADMIN` is present in the docker run command. With gVisor runtime, the firewall does not work due to gVisor's virtualized network stack — this is expected.
+The iptables firewall requires NET_ADMIN capability. Firewall init failure is now **fatal** — the container will not start without network restrictions in place. If you see this error, check that `--cap-add=NET_ADMIN` is present in the docker run command. With gVisor runtime, the firewall does not work due to gVisor's virtualized network stack — this is expected (use default runc runtime instead).
 
 ### Permission denied on project files
 
@@ -492,7 +505,7 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 - **init-firewall.sh** — iptables chain setup, DNS rate limiting (1/sec burst 2, 192-byte cap), SSH blocking, ipset creation, connectivity verification
 - **reload-firewall.sh** — Reads `firewall-allowlist.conf`, resolves domains, fetches GitHub IPs, atomic ipset swap
 - **firewall-allowlist.conf** — Configurable domain allowlist for the container firewall
-- **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus ptrace, process_vm, perf_event, memfd, io_uring, userfaultfd, personality; AF_VSOCK blocked)
+- **seccomp-profile.json** — Custom seccomp allowlist (Docker default minus ptrace, process_vm, perf_event, memfd, io_uring, userfaultfd, personality; AF_VSOCK blocked; clone namespace flags including CLONE_NEWTIME blocked)
 - **git-guard.c** — LD_PRELOAD library enforcing git operation restrictions (push, remote, submodule, config key blocking, `GIT_CONFIG_COUNT` forcing). Loaded via `/etc/ld.so.preload` on read-only rootfs.
 - **git-wrapper.sh** — Shell wrapper forcing `GIT_CONFIG_COUNT` on every git invocation (defense-in-depth for statically-linked callers)
 - **nodump.c** — LD_PRELOAD library setting `PR_SET_DUMPABLE=0` after exec (prevents `/proc/<pid>/mem` access)
