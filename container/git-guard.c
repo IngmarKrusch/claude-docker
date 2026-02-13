@@ -10,10 +10,10 @@
  *   - GIT_CONFIG_COUNT env vars forced (hooksPath, credential.helper,
  *     core.fsmonitor, core.sshCommand)
  *
- * Known limitation: credential extraction (git credential fill/get) is NOT
- * blocked — the AI runs as the same UID as git, so it can bypass any git-level
- * block via direct socket access (net.connect to the credential cache socket).
- * Mitigation: use fine-grained PATs with minimal scope.
+ * Credential extraction: git credential fill is blocked (R11-02 hardening),
+ * but the token remains accessible via direct socket connect to the credential
+ * cache daemon (same-UID limitation). Mitigation: use fine-grained PATs with
+ * minimal scope.
  *
  * Root (UID 0) is exempt — the entrypoint is trusted init code.
  * Non-git processes return immediately (one readlink + strcmp).
@@ -230,6 +230,16 @@ static void git_guard_init(void) {
     if (strcmp(subcmd, "submodule") == 0 && sub_idx + 1 < argc) {
         if (strcmp(argv[sub_idx + 1], "add") == 0)
             block("git submodule add is disabled in the sandbox");
+    }
+
+    /* Block: git credential fill (R11-02 hardening)
+     * NOTE: This blocks the trivial extraction path only. The token remains
+     * accessible via direct socket connect to /tmp/.git-credential-cache/sock
+     * (same-UID limitation). Root-cause fix requires fine-grained PATs. */
+    if (strcmp(subcmd, "credential") == 0 && sub_idx + 1 < argc) {
+        const char *cred_action = argv[sub_idx + 1];
+        if (strcmp(cred_action, "fill") == 0)
+            block("git credential extraction is disabled in the sandbox");
     }
 
     /* Block: git config <dangerous-key> */

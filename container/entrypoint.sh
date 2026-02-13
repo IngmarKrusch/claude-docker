@@ -94,6 +94,10 @@ sync_back_on_exit() {
     local SYNC_DIR="/home/claude/.claude-sync"
     if [ -d "$SYNC_DIR" ]; then
         local STAGING="$SYNC_DIR/data"
+        # R11-04 fix: Wipe any pre-populated files before rsync.
+        # Runs as root, so even if virtiofs ignores chown (macOS), this
+        # ensures only files from $CLAUDE_DIR end up in staging.
+        rm -rf "$STAGING"
         mkdir -p "$STAGING"
 
         # Copy everything that changed, EXCLUDING blocked and transient files.
@@ -128,6 +132,13 @@ sync_back_on_exit() {
 
 if [ "${SYNC_BACK:-}" = "1" ]; then
     trap sync_back_on_exit EXIT
+fi
+
+# R11-04 fix: Lock down sync-back staging directory so claude user cannot
+# pre-populate files that would be rsync'd to the host on exit.
+if [ "${SYNC_BACK:-}" = "1" ] && [ -d "/home/claude/.claude-sync" ]; then
+    chown root:root /home/claude/.claude-sync 2>/dev/null || true
+    chmod 700 /home/claude/.claude-sync 2>/dev/null || true
 fi
 
 # Create push flag file (root-owned, immutable after privilege drop)
@@ -260,6 +271,11 @@ if [ -f /workspace/.git/config ]; then
     sha256sum /workspace/.git/config 2>/dev/null | cut -d' ' -f1 > /run/git-config-hash || true
     chmod 444 /run/git-config-hash 2>/dev/null || true
     chown root:root /run/git-config-hash 2>/dev/null || true
+    # R11-01/R11-07 fix: Make .git/config immutable after sanitization.
+    # Prevents direct file edits (python, sed, echo) that bypass git-guard,
+    # blocking filter driver injection and TOCTOU config manipulation.
+    chown root:root /workspace/.git/config 2>/dev/null || true
+    chmod 444 /workspace/.git/config 2>/dev/null || true
 fi
 
 # Note: core.hooksPath and credential.helper are enforced by the git wrapper

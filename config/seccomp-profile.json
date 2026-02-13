@@ -51,7 +51,7 @@
         "munlockall", "munmap", "name_to_handle_at", "nanosleep", "newfstatat",
         "_newselect", "open", "openat", "openat2", "pause", "pidfd_open",
         "pidfd_send_signal", "pipe", "pipe2", "pkey_alloc", "pkey_free",
-        "pkey_mprotect", "poll", "ppoll", "ppoll_time64", "prctl", "pread64",
+        "pkey_mprotect", "poll", "ppoll", "ppoll_time64", "pread64",
         "preadv", "preadv2", "prlimit64", "process_mrelease", "pselect6",
         "pselect6_time64", "pwrite64", "pwritev", "pwritev2", "read", "readahead",
         "readlink", "readlinkat", "readv", "recv", "recvfrom", "recvmmsg",
@@ -91,6 +91,23 @@
       "action": "SCMP_ACT_ALLOW",
       "args": [
         { "index": 0, "value": 40, "op": "SCMP_CMP_NE" }
+      ]
+    },
+    {
+      "comment": "prctl: allow all operations except PR_SET_DUMPABLE (4) with nonzero arg (R11-05 fix)",
+      "names": ["prctl"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 4, "op": "SCMP_CMP_NE" }
+      ]
+    },
+    {
+      "comment": "prctl: allow PR_SET_DUMPABLE(4) only with arg=0 (nodump.so needs this)",
+      "names": ["prctl"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 4, "op": "SCMP_CMP_EQ" },
+        { "index": 1, "value": 0, "op": "SCMP_CMP_EQ" }
       ]
     },
     {
