@@ -131,6 +131,8 @@ sync_back_on_exit() {
             --exclude='statusline-command.sh' \
             --exclude='CLAUDE.md' \
             --exclude='.credentials.json' \
+            --exclude='.config.json' \
+            --exclude='.config.json.backup.*' \
             --exclude='.gitconfig' \
             --exclude='entrypoint.log' \
             --exclude='.history-baseline-lines' \
@@ -167,9 +169,13 @@ if [ "${SYNC_BACK:-}" = "1" ]; then
     trap sync_back_on_exit EXIT
 fi
 
-# R11-04 fix: Lock down sync-back staging directory so claude user cannot
-# pre-populate files that would be rsync'd to the host on exit.
+# R11-04 / R13-03: Sync-back staging directory protection.
+# NOTE: virtiofs on macOS ignores chown/chmod, so POSIX permission lockdown is
+# ineffective on OrbStack/Docker Desktop. The actual protection is the EXIT trap's
+# rm-rf-then-mkdir-then-rsync sequence in sync_back_on_exit(), which wipes any
+# pre-populated files before rsyncing legitimate session data from the tmpfs.
 if [ "${SYNC_BACK:-}" = "1" ] && [ -d "/home/claude/.claude-sync" ]; then
+    # Best-effort lockdown (works on native Linux, no-op on virtiofs)
     chown root:root /home/claude/.claude-sync 2>/dev/null || true
     chmod 700 /home/claude/.claude-sync 2>/dev/null || true
 fi
@@ -232,6 +238,11 @@ fi
 # Deferred credential scrub: overwrite and delete the plaintext credentials file
 # after Claude Code has had time to read and cache them. We overwrite rather than
 # chmod because virtiofs (macOS Docker mounts) ignores POSIX permission changes.
+# NOTE: This scrub is best-effort. Claude Code may re-create .credentials.json
+# after the scrub completes, so the file may persist for the entire session
+# lifetime. True protection comes from: (1) .credentials.json is excluded from
+# sync-back so tokens never reach the host, (2) the firewall restricts where
+# tokens can be sent, (3) tmpfs is ephemeral — gone on container exit.
 (sleep 1 && {
     CRED_SIZE=$(stat -c%s "$CREDS_FILE" 2>/dev/null || echo 0)
     if [ "$CRED_SIZE" -gt 0 ]; then

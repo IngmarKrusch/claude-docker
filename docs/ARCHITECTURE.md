@@ -43,7 +43,8 @@ For setup and usage, see the [README](../README.md). For security model and hard
 │  │  │  Credential flow:                        │  │  │
 │  │  │   --env-file (tmpfile, deleted 2s)       │  │  │
 │  │  │     → ~/.claude/.credentials.json        │  │  │
-│  │  │     → env var unset, file scrubbed (1s)  │  │  │
+│  │  │     → env var unset, scrub attempted     │  │  │
+│  │  │       (1s, best-effort — may persist)    │  │  │
 │  │  └──────────────────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────┘
@@ -54,7 +55,7 @@ For setup and usage, see the [README](../README.md). For security model and hard
 1. **Mount isolation** — copy session data from host-side staging dir (`/mnt/.claude-host`, contains only needed files) to writable tmpfs (`~/.claude`). Uses `cp -P` (no symlink dereferencing). Project data loaded using host-side `PROJECT_PATH` encoding for per-project isolation.
 2. **Push flag** — create `/run/sandbox-flags/allow-git-push` if `--allow-git-push` was passed (root-owned, immutable after privilege drop)
 3. **Firewall** — initialize iptables allowlist, IPv6 disable, port restrictions (443/80), DNS blocked for claude user (pre-resolved via `/etc/hosts`), SSH blocking, connectivity verification. **Firewall init failure is fatal** — container exits if network restrictions cannot be established.
-4. **Credentials** — write OAuth tokens to file, schedule background scrub (urandom overwrite + delete after 1s)
+4. **Credentials** — write OAuth tokens to file, schedule background scrub (best-effort urandom overwrite + delete after 1s — may persist if CC re-creates the file)
 5. **Git config** — build global gitconfig from host (`~/.gitconfig` mount guarded — only mounted if file exists on host), strip host credential helpers, set `core.hooksPath=/dev/null`, strip `filter` section (prevents command injection via LFS filter definitions)
 6. **Git config sanitization** — strip dangerous keys from workspace `.git/config` (all git-guard blocked keys/sections), write post-sanitization SHA-256 hash to **immutable root-owned file** (`chmod 444`, prevents tampering with tamper detection baseline)
 7. **GitHub credentials** — feed token into `git credential-cache` (memory-only), scoped to workspace repo via `useHttpPath`
@@ -62,15 +63,15 @@ For setup and usage, see the [README](../README.md). For security model and hard
 
 ## Post-Exit Lifecycle
 
-1. **Sync-back** — rsync session artifacts from container staging dir to host `~/.claude/` (if enabled). Uses `--no-links` (skips all symlinks). Project data relocated from `-workspace` to host-encoded path before sync. Excludes `settings.json`, `settings.local.json`, `statusline-command.sh`, `CLAUDE.md`, `.credentials.json`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines`.
+1. **Sync-back** — rsync session artifacts from container staging dir to host `~/.claude/` (if enabled). Uses `--no-links` (skips all symlinks). Project data relocated from `-workspace` to host-encoded path before sync. Excludes `settings.json`, `settings.local.json`, `statusline-command.sh`, `CLAUDE.md`, `.credentials.json`, `.config.json` / `.config.json.backup.*`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines`.
 2. **`.git/config` tamper detection** — compare SHA-256 hash against immutable post-sanitization baseline; **check for symlink attacks** before restore (prevents arbitrary host file overwrite); auto-restore from pre-session backup and re-apply full sanitization if modified
 3. **Hook detection** — warn about new non-`.sample` files in `.git/hooks/`. **ANSI escape sequences sanitized** to prevent terminal injection.
 4. **Dangerous config scan** — check `.git/config` for **all git-guard blocked keys** (comprehensive coverage of exact keys and prefix-based sections)
-5. **Suspect file warnings** — detect `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows` that were **created or modified** during the session (pre/post SHA-256 comparison). **ANSI escape sequences sanitized**.
+5. **Suspect file warnings** — detect `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows` that were **created or modified** during the session (pre/post SHA-256 comparison). **ANSI escape sequences sanitized**.
 
 ## Persistent State
 
-By default, the host's `~/.claude/` is mounted **read-only** into the container. A writable tmpfs overlay is used for the session. On clean exit, session data (transcripts, memory, plans, etc.) is synced back to the host — but `settings.json` and user-level `CLAUDE.md` are **never** synced back, preventing privilege escalation and prompt injection attacks.
+By default, the host's `~/.claude/` is mounted **read-only** into the container. A writable tmpfs overlay is used for the session. On clean exit, session data (transcripts, memory, plans, etc.) is synced back to the host — but `settings.json`, `.config.json`, and user-level `CLAUDE.md` are **never** synced back, preventing privilege escalation, config poisoning, and prompt injection attacks.
 
 Use `--no-sync-back` to disable all sync-back. Use `--isolate-claude-data` for Docker Desktop compatibility (uses a named Docker volume instead).
 

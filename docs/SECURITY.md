@@ -86,7 +86,7 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
 | Mechanism | Details |
 |-----------|---------|
 | OAuth tokens via `--env-file` | Credentials written to a `chmod 600` temp file, passed via `--env-file` (not `-e`), temp file deleted 2s after launch. Not visible in `ps aux` or `docker inspect`. |
-| Entrypoint credential lifecycle | Writes credentials to `~/.claude/.credentials.json` (tmpfs), unsets the env var. Background process overwrites the file with urandom and deletes it after 1s — credentials exist on disk for ~1s only. |
+| Entrypoint credential lifecycle | Writes credentials to `~/.claude/.credentials.json` (tmpfs), unsets the env var. Background process attempts to overwrite the file with urandom and delete it after 1s — however, Claude Code may re-create the file, so credentials may persist on tmpfs for the session lifetime. True protection: excluded from sync-back, firewall limits exfiltration targets, tmpfs is ephemeral. |
 | GitHub token in memory only | Stored in `git credential-cache` daemon memory (never on disk). Cache socket on `/tmp` (tmpfs), gone when the container exits. `GITHUB_TOKEN` env var unset before the credential cache daemon starts (prevents leaking via `/proc/<pid>/environ`). |
 | Token scoped to workspace repo | `credential.https://github.com.useHttpPath=true` + token stored with the workspace repo path — won't serve the token for requests to other repos |
 | `--disallow-broad-gh-token` | Rejects `ghp_*` (classic) and `gho_*` (OAuth) tokens at launch. Only fine-grained PATs (`github_pat_*`) accepted. |
@@ -113,6 +113,7 @@ NOT exposed: `debug/`, `session-env/`, `file-history/`, `paste-cache/`, `cache/`
 | **Settings escalation** — write `{"permissions":{"allow":["Bash(*)"]}}` to `settings.json` | Writes go to tmpfs; `settings.json` is never synced back to host |
 | **CLAUDE.md poisoning** — inject malicious instructions into user-level `~/.claude/CLAUDE.md` | Writes go to tmpfs; user-level `CLAUDE.md` is never synced back to host |
 | **Plugin injection** — modify host plugins for persistent compromise | Writes go to tmpfs; lost on exit (plugins do sync back by default) |
+| **`.config.json` poisoning** — inject `allowedTools`, `mcpServers`, trust dialog overrides into config for future sessions | `.config.json` is never synced back to host (same treatment as `settings.json`). Writes go to tmpfs only. |
 | **Cross-project data leakage** — read other projects' memories, sessions, history | Host-side staging copies only the current project's data; other projects' directories are never mounted. `PROJECT_PATH` env var carries host-side path for per-project encoding — sync-back writes to project-specific directory, not shared `-workspace` |
 
 **Sync-back (default: on):** On clean container exit, session artifacts are synced back to the host for continuity (transcripts, memory, plans, history, etc.). Sync-back uses `rsync --no-links` to prevent symlink planting attacks (all symlinks are silently skipped — both absolute and relative). **Project data is relocated** from the container's generic `-workspace` encoding to the host's real project path encoding before sync, preventing cross-project leakage. Multiple files are **never** synced back regardless of settings:
@@ -120,6 +121,7 @@ NOT exposed: `debug/`, `session-env/`, `file-history/`, `paste-cache/`, `cache/`
 - `settings.json` / `settings.local.json` — prevents tool auto-approval escalation
 - `statusline-command.sh` — prevents command injection via status line
 - `CLAUDE.md` (user-level) — prevents persistent prompt injection
+- `.config.json` / `.config.json.backup.*` — prevents poisoning of `allowedTools`, `mcpServers`, trust dialogs, and other security-relevant config fields that would take effect in future sessions
 - `.credentials.json`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines` — internal state files
 
 Use `--no-sync-back` to disable all sync-back. Project-level `/workspace/CLAUDE.md` is unaffected by this protection (writable via the workspace mount).
@@ -154,7 +156,7 @@ After the container exits, `run-claude.sh` performs a workspace audit on the hos
 1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline (immutable root-owned file, prevents tampering). If modified during the session, **checks for symlink attacks** (prevents arbitrary host file overwrite), then auto-restores from pre-session backup and re-applies sanitization (strips all git-guard blocked keys/sections).
 2. **Hook detection** — scans `.git/hooks/` for new non-`.sample` files added during the session. Output is **sanitized for ANSI escape sequences** to prevent terminal injection via crafted filenames.
 3. **Dangerous config key scan** — checks `.git/config` for **all git-guard blocked keys** (exact keys, prefix-based sections like `url.*`, `http.*`, `remote.*`, `credential.*`, `filter.*`, `alias.*`, `diff.*`, `merge.*`, `includeIf.*`) as a final safety net.
-4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox: `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, `package.json`, `.npmrc`, `.eslintrc.js`, `jest.config.js`, `tsconfig.json`, `setup.py`, `pyproject.toml`, `.pre-commit-config.yaml`, `docker-compose.yml`, and others (30+ patterns). Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
+4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox or inject persistent prompts: `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, `package.json`, `.npmrc`, `.eslintrc.js`, `jest.config.js`, `tsconfig.json`, `setup.py`, `pyproject.toml`, `.pre-commit-config.yaml`, `docker-compose.yml`, and others (30+ patterns). Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
 
 ## Known Limitations
 
@@ -164,6 +166,8 @@ After the container exits, `run-claude.sh` performs a workspace audit on the hos
 | **HIGH** | **API endpoint exfiltration** (accepted risk) — `api.anthropic.com` accepts 200K tokens/request (~800KB), `api.github.com` accepts gists/issues/repos, `registry.npmjs.org` accepts `npm publish` | Inherent to Claude Code operation — cannot function without API access. Mitigations: fine-grained GitHub PATs, session transcript review, `git diff` after sessions. |
 | **MEDIUM** | **Workspace write-back** — `/workspace` is writable; session could plant `.envrc`, hooks, CI configs that execute on host | Post-exit audit warns about dangerous files. Review `git diff` after sessions. |
 | **LOW** | **History readable** — container receives host `history.jsonl` for `--continue` (current session only; other projects' data not exposed via host-side staging) | HTTPS exfiltration to allowed domains remains possible (accepted risk above). |
+| **LOW** | **`.config.json` PII exposure** (accepted risk) — `.config.json` is copied unfiltered into the container, exposing email, account UUIDs, project paths, and usage metrics to the AI agent | Incremental risk — the AI already has access to workspace code. Firewall limits exfiltration targets. `.config.json` is excluded from sync-back to prevent poisoning. |
+| **LOW** | **Credential file persists on tmpfs** — `.credentials.json` scrub is best-effort; Claude Code may re-create it after the 1s scrub | Already excluded from sync-back. Firewall limits exfiltration. Tmpfs is ephemeral (gone on exit). |
 | **LOW** | **npm/npx execution** — MCP servers rely on npx, which downloads and runs packages from the npm registry | Firewall allowlist limits what can be downloaded. `~/.npm` is mounted with `noexec`. |
 | **INFO** | **noexec bypass via interpreter** — `python3 script.py` works on noexec mounts | Fundamental to how interpreters work; the interpreter binary (not the script) is what the kernel executes. |
 | **INFO** | **NETLINK sockets allowed** — seccomp allows socket creation (AF_NETLINK) | No capabilities to use them meaningfully (NET_ADMIN/NET_RAW cleared after init). |
