@@ -175,7 +175,7 @@ NOT exposed: `debug/`, `session-env/`, `file-history/`, `paste-cache/`, `cache/`
 
 Use `--no-sync-back` to disable all sync-back. Project-level `/workspace/CLAUDE.md` is unaffected by this protection (writable via the workspace mount).
 
-**Note:** `--resume <session-id>` from a *different* project won't work because only the current project's transcripts are copied. Sync-back only fires on clean exit (Ctrl+C, `/exit`, `docker stop`); `docker kill` or OOM kills skip it.
+**Note:** See [Resuming sessions](#resuming-sessions) for details on cross-context resume and caveats.
 
 #### `/proc/<pid>/mem` protection
 
@@ -205,7 +205,7 @@ After the container exits, `run-claude.sh` performs a workspace audit on the hos
 1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline (immutable root-owned file, prevents tampering). If modified during the session, **checks for symlink attacks** (prevents arbitrary host file overwrite), then auto-restores from pre-session backup and re-applies sanitization (strips all git-guard blocked keys/sections).
 2. **Hook detection** — scans `.git/hooks/` for new non-`.sample` files added during the session. Output is **sanitized for ANSI escape sequences** to prevent terminal injection via crafted filenames.
 3. **Dangerous config key scan** — checks `.git/config` for **all git-guard blocked keys** (exact keys, prefix-based sections like `url.*`, `http.*`, `remote.*`, `credential.*`, `filter.*`, `alias.*`, `diff.*`, `merge.*`, `includeIf.*`) as a final safety net.
-4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox: `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`. Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
+4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox: `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, `package.json`, `.npmrc`, `.eslintrc.js`, `jest.config.js`, `tsconfig.json`, `setup.py`, `pyproject.toml`, `.pre-commit-config.yaml`, `docker-compose.yml`, and others (30+ patterns). Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
 
 ### What we tried and removed
 
@@ -322,6 +322,27 @@ Everything that isn't a script flag or the project directory is passed through t
 ```
 
 The first argument that is an existing directory becomes the project dir. All other non-script arguments go to claude. Run `./run-claude.sh -h` for full details.
+
+### Resuming sessions
+
+Sessions can be resumed across container restarts and between the container and host:
+
+```bash
+# Continue last session (same project)
+./run-claude.sh ~/Projects/my-project --continue
+
+# Resume a specific session by ID
+./run-claude.sh ~/Projects/my-project --resume SESSION_ID
+```
+
+Sessions created inside the container are resumable from the host (`claude --continue`), and host-native sessions are resumable from inside the container. The `project` field in `history.jsonl` is automatically translated between the host path and `/workspace` at container boundaries.
+
+**Caveats:**
+
+- **Same project only** — only the current project's transcripts are staged into the container. You cannot resume a session from a different project.
+- **Clean exit required** — sync-back runs on `/exit`, Ctrl+C, or `docker stop`. If the container is killed (`docker kill`, OOM, crash), session data on the tmpfs is lost.
+- **`--no-sync-back` disables resume** — without sync-back, session data is not written to the host and cannot be resumed in the next run.
+- **`--isolate-claude-data`** — uses a persistent Docker volume instead of sync-back. Sessions persist across container restarts automatically, but are not accessible from the host.
 
 ### Git push from the container
 

@@ -38,6 +38,14 @@ if [ -d "$HOST_CLAUDE" ]; then
     # Record baseline line count so sync-back can send only new entries
     wc -l < "$CLAUDE_DIR/history.jsonl" 2>/dev/null > "$CLAUDE_DIR/.history-baseline-lines" || true
 
+    # Rewrite host project path → /workspace in history.jsonl so that sessions
+    # from prior container runs AND host-native sessions are all discoverable
+    # by Claude Code (which filters --continue/--resume by CWD = /workspace).
+    if [ -n "${PROJECT_PATH:-}" ] && [ -f "$CLAUDE_DIR/history.jsonl" ]; then
+        sed -i "s|\"project\":\"${PROJECT_PATH}\"|\"project\":\"/workspace\"|g" \
+            "$CLAUDE_DIR/history.jsonl" 2>/dev/null || true
+    fi
+
     # 5. Current project data ONLY: memory + session transcripts
     #    Encode workspace path the same way Claude Code does (/ → -)
     WORKSPACE_PATH=$(readlink -f /workspace)
@@ -91,6 +99,12 @@ fi
 
 # --- Sync-back: EXIT trap to stage data for host merge ---
 sync_back_on_exit() {
+    # Wait for child to finish writing session data before rsyncing.
+    # Without this, Ctrl+C can trigger sync-back while Claude Code is still
+    # flushing history.jsonl and transcript files, losing the session.
+    if [ -n "${CHILD_PID:-}" ]; then
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
     local SYNC_DIR="/home/claude/.claude-sync"
     if [ -d "$SYNC_DIR" ]; then
         local STAGING="$SYNC_DIR/data"
@@ -126,6 +140,14 @@ sync_back_on_exit() {
                 cp -a "$STAGING/projects/-workspace/." "$STAGING/projects/$HOST_ENCODED/" 2>/dev/null || true
                 rm -rf "$STAGING/projects/-workspace"
             fi
+        fi
+
+        # Rewrite /workspace → host project path in history.jsonl so that
+        # container sessions are discoverable by host-native Claude Code
+        # (which filters --continue/--resume by the real host CWD).
+        if [ -n "${PROJECT_PATH:-}" ] && [ -f "$STAGING/history.jsonl" ]; then
+            sed -i "s|\"project\":\"/workspace\"|\"project\":\"${PROJECT_PATH}\"|g" \
+                "$STAGING/history.jsonl" 2>/dev/null || true
         fi
     fi
 }
@@ -394,8 +416,10 @@ if [ "${SYNC_BACK:-}" = "1" ]; then
     CHILD_PID=$!
     # Forward signals to child
     # M11 Round 10 fix: Wait for child after TERM to prevent sync-back race
+    # Applied to INT as well — Ctrl+C without wait causes the EXIT trap to
+    # rsync while Claude Code is still flushing session data, losing it.
     trap 'kill -TERM $CHILD_PID 2>/dev/null; wait $CHILD_PID 2>/dev/null' TERM
-    trap 'kill -INT $CHILD_PID 2>/dev/null' INT
+    trap 'kill -INT $CHILD_PID 2>/dev/null; wait $CHILD_PID 2>/dev/null' INT
     wait $CHILD_PID
     EXIT_CODE=$?
     exit $EXIT_CODE   # triggers sync_back_on_exit via EXIT trap

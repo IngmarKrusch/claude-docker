@@ -342,6 +342,14 @@ else
         cp -rP "$HOME/.claude/projects/$_HOST_ENCODED/." \
                "$CLAUDE_STAGING/projects/$_HOST_ENCODED/" 2>/dev/null || true
     fi
+    # Also stage the -workspace directory if it exists — older sessions (before
+    # M12 Round 10 path fix) wrote transcripts here and they were never relocated.
+    # The entrypoint merges both into -workspace/ inside the container.
+    if [ -d "$HOME/.claude/projects/-workspace" ] && [ "$_HOST_ENCODED" != "-workspace" ]; then
+        mkdir -p "$CLAUDE_STAGING/projects/$_HOST_ENCODED"
+        cp -rP "$HOME/.claude/projects/-workspace/." \
+               "$CLAUDE_STAGING/projects/$_HOST_ENCODED/" 2>/dev/null || true
+    fi
 
     # Directories (matches entrypoint.sh lines 63-80)
     for d in statsig plugins plans todos; do
