@@ -226,6 +226,24 @@ static void git_guard_init(void) {
             block("git remote modification is disabled in the sandbox");
     }
 
+    /* R12-M04 fix: Block git clone --config <blocked-key>=<value>
+     * git clone accepts --config/-c to set config keys in the cloned repo,
+     * bypassing the git-config subcommand parsing above. */
+    if (strcmp(subcmd, "clone") == 0) {
+        for (int j = sub_idx + 1; j < argc; j++) {
+            if ((strcmp(argv[j], "--config") == 0 || strcmp(argv[j], "-c") == 0)
+                && j + 1 < argc) {
+                if (check_config_arg(argv[j + 1]))
+                    block("git clone --config with blocked key is disabled in the sandbox");
+                j++; /* skip value */
+            } else if (strncmp(argv[j], "--config=", 9) == 0) {
+                /* --config=key=value combined form */
+                if (check_config_arg(argv[j] + 9))
+                    block("git clone --config with blocked key is disabled in the sandbox");
+            }
+        }
+    }
+
     /* Block: git submodule add */
     if (strcmp(subcmd, "submodule") == 0 && sub_idx + 1 < argc) {
         if (strcmp(argv[sub_idx + 1], "add") == 0)

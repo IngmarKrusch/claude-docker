@@ -6,9 +6,10 @@ LAUNCH_LOG=""
 log() { echo "$1"; LAUNCH_LOG+="$1"$'\n'; }
 
 # M9 Round 10 fix: Sanitize ANSI escape sequences to prevent terminal injection
-# Removes CSI sequences (ESC[...X), OSC sequences (ESC]...BEL), and bare escapes
+# Removes CSI sequences (ESC[...X), OSC sequences (ESC]...BEL), DCS sequences
+# (ESC P...ST), 8-bit C1 control codes (0x80-0x9F), and bare escapes
 sanitize_ansi() {
-    LC_ALL=C sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[^[]\{0,2\}//g'
+    LC_ALL=C sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1bP[^\x1b]*\x1b\\//g; s/[\x80-\x9f]//g; s/\x1b[^[]\{0,2\}//g'
 }
 
 usage() {
@@ -280,11 +281,18 @@ elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
 fi
 
 # Detect runtime: use runc by default, gVisor only with --with-gvisor
-RUNTIME_FLAG=""
+RUNTIME_FLAG=()
 if [ "$WITH_GVISOR" = true ]; then
     if docker info 2>/dev/null | grep -q runsc; then
-        RUNTIME_FLAG="--runtime=runsc"
-        log "[sandbox] Using gVisor runtime (note: firewall inactive with gVisor)"
+        RUNTIME_FLAG=(--runtime=runsc)
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║  WARNING: gVisor runtime disables the iptables firewall.    ║"
+        echo "║  The container will have UNRESTRICTED network access.       ║"
+        echo "║  All network-layer security controls are bypassed.          ║"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+        log "[sandbox] Using gVisor runtime (firewall inactive)"
     else
         log "[sandbox] Warning: --with-gvisor requested but runsc not available, using runc"
     fi
@@ -308,10 +316,10 @@ if [ "$ALLOW_GIT_PUSH" = true ]; then
 fi
 
 # Determine Claude data mount strategy
-CLAUDE_MOUNT_FLAGS=""
-SYNC_BACK_FLAGS=""
+CLAUDE_MOUNT_FLAGS=()
+SYNC_BACK_FLAGS=()
 if [ "$ISOLATE_DATA" = true ]; then
-    CLAUDE_MOUNT_FLAGS="-v claude-data:/home/claude/.claude"
+    CLAUDE_MOUNT_FLAGS=(-v claude-data:/home/claude/.claude)
     SYNC_BACK=false
     log "[sandbox] Using isolated data volume"
 else
@@ -330,16 +338,18 @@ else
     CLAUDE_STAGING=$(mktemp -d)
 
     # Individual files (matches entrypoint.sh lines 24-83)
+    # R12-H04 fix: Use cp -L to dereference symlinks — prevents smuggling
+    # malicious symlinks from ~/.claude into the container
     for f in .config.json settings.json settings.local.json statusline-command.sh \
              CLAUDE.md history.jsonl stats-cache.json; do
-        cp -P "$HOME/.claude/$f" "$CLAUDE_STAGING/" 2>/dev/null || true
+        cp -L "$HOME/.claude/$f" "$CLAUDE_STAGING/" 2>/dev/null || true
     done
 
     # Current project data only (matches entrypoint.sh lines 42-60)
     _HOST_ENCODED=$(echo "$PROJECT_DIR" | sed 's|/|-|g')
     if [ -d "$HOME/.claude/projects/$_HOST_ENCODED" ]; then
         mkdir -p "$CLAUDE_STAGING/projects/$_HOST_ENCODED"
-        cp -rP "$HOME/.claude/projects/$_HOST_ENCODED/." \
+        cp -rL "$HOME/.claude/projects/$_HOST_ENCODED/." \
                "$CLAUDE_STAGING/projects/$_HOST_ENCODED/" 2>/dev/null || true
     fi
     # Also stage the -workspace directory if it exists — older sessions (before
@@ -347,23 +357,23 @@ else
     # The entrypoint merges both into -workspace/ inside the container.
     if [ -d "$HOME/.claude/projects/-workspace" ] && [ "$_HOST_ENCODED" != "-workspace" ]; then
         mkdir -p "$CLAUDE_STAGING/projects/$_HOST_ENCODED"
-        cp -rP "$HOME/.claude/projects/-workspace/." \
+        cp -rL "$HOME/.claude/projects/-workspace/." \
                "$CLAUDE_STAGING/projects/$_HOST_ENCODED/" 2>/dev/null || true
     fi
 
     # Directories (matches entrypoint.sh lines 63-80)
     for d in statsig plugins plans todos; do
-        [ -d "$HOME/.claude/$d" ] && cp -rP "$HOME/.claude/$d" "$CLAUDE_STAGING/" 2>/dev/null || true
+        [ -d "$HOME/.claude/$d" ] && cp -rL "$HOME/.claude/$d" "$CLAUDE_STAGING/" 2>/dev/null || true
     done
 
-    CLAUDE_MOUNT_FLAGS="-v $CLAUDE_STAGING:/mnt/.claude-host:ro --tmpfs /home/claude/.claude:rw,nosuid,size=512m"
+    CLAUDE_MOUNT_FLAGS=(-v "$CLAUDE_STAGING:/mnt/.claude-host:ro" --tmpfs /home/claude/.claude:rw,nosuid,size=512m)
     log "[sandbox] Staged ~/.claude data (host-side, read-only mount)"
 
     # Set up sync-back staging directory
     if [ "$SYNC_BACK" = true ]; then
         SYNC_DIR="$HOME/.claude/.sync-back"
         mkdir -p "$SYNC_DIR"
-        SYNC_BACK_FLAGS="-v $SYNC_DIR:/home/claude/.claude-sync:rw -e SYNC_BACK=1"
+        SYNC_BACK_FLAGS=(-v "$SYNC_DIR:/home/claude/.claude-sync:rw" -e SYNC_BACK=1)
         log "[sandbox] Sync-back enabled (use --no-sync-back to disable)"
     fi
 fi
@@ -400,9 +410,9 @@ fi
 
 # H7 Round 10 fix: Snapshot suspect files for modification-based post-exit audit
 # (avoids false positives on pre-existing files that weren't changed)
-SUSPECT_FILES=".envrc .vscode/settings.json .vscode/tasks.json Makefile .gitattributes .gitmodules .github/workflows package.json .npmrc .yarnrc.yml .eslintrc.js .eslintrc.cjs jest.config.js jest.config.ts vitest.config.ts vitest.config.js .prettierrc.js tsconfig.json setup.py setup.cfg pyproject.toml .pre-commit-config.yaml .tool-versions .node-version .nvmrc .python-version docker-compose.yml docker-compose.yaml lefthook.yml .husky CMakeLists.txt .cargo/config.toml"
+SUSPECT_FILES=(.envrc .vscode/settings.json .vscode/tasks.json Makefile .gitattributes .gitmodules .github/workflows package.json .npmrc .yarnrc.yml .eslintrc.js .eslintrc.cjs jest.config.js jest.config.ts vitest.config.ts vitest.config.js .prettierrc.js tsconfig.json setup.py setup.cfg pyproject.toml .pre-commit-config.yaml .tool-versions .node-version .nvmrc .python-version docker-compose.yml docker-compose.yaml lefthook.yml .husky CMakeLists.txt .cargo/config.toml)
 PRE_SUSPECT=""
-for _sf in $SUSPECT_FILES; do
+for _sf in "${SUSPECT_FILES[@]}"; do
     if [ -e "$PROJECT_DIR/$_sf" ]; then
         if [ -f "$PROJECT_DIR/$_sf" ]; then
             _h=$(shasum -a 256 "$PROJECT_DIR/$_sf" 2>/dev/null | cut -d' ' -f1)
@@ -425,9 +435,9 @@ trap _cleanup_temps EXIT
 (sleep 2 && rm -f "$ENVFILE") &
 
 # M4 Round 10 fix: Only mount ~/.gitconfig if it exists
-GITCONFIG_MOUNT=""
+GITCONFIG_MOUNT=()
 if [ -f "$HOME/.gitconfig" ]; then
-    GITCONFIG_MOUNT="-v $HOME/.gitconfig:/tmp/host-gitconfig:ro"
+    GITCONFIG_MOUNT=(-v "$HOME/.gitconfig:/tmp/host-gitconfig:ro")
 fi
 
 # Pre-resolve allowlisted domains and inject into container /etc/hosts via
@@ -435,7 +445,7 @@ fi
 # eliminates DNS tunneling exfiltration (~25 B/s was possible with rate-limiting).
 # The ipset (populated inside the container by root) still controls IP-level
 # filtering; these entries only provide hostname resolution.
-ADD_HOST_FLAGS=""
+ADD_HOST_FLAGS=()
 ALLOWLIST_CONF="$SCRIPT_DIR/config/firewall-allowlist.conf"
 if [ -f "$ALLOWLIST_CONF" ]; then
     while IFS= read -r _fw_line; do
@@ -444,23 +454,22 @@ if [ -f "$ALLOWLIST_CONF" ]; then
         if [ "$_fw_line" = "@github" ]; then
             # Resolve the specific GitHub hosts that git/gh CLI connect to
             for _gh_host in github.com api.github.com; do
-                for _ip in $(dig +short A "$_gh_host" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
-                    ADD_HOST_FLAGS+=" --add-host=${_gh_host}:${_ip}"
+                for _ip in $(dig +short A "$_gh_host" 2>/dev/null | grep -E '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'); do
+                    ADD_HOST_FLAGS+=("--add-host=${_gh_host}:${_ip}")
                 done
             done
         else
-            for _ip in $(dig +short A "$_fw_line" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
-                ADD_HOST_FLAGS+=" --add-host=${_fw_line}:${_ip}"
+            for _ip in $(dig +short A "$_fw_line" 2>/dev/null | grep -E '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'); do
+                ADD_HOST_FLAGS+=("--add-host=${_fw_line}:${_ip}")
             done
         fi
     done < "$ALLOWLIST_CONF"
 fi
 
 set +e
-# shellcheck disable=SC2086
 docker run --rm -it \
     --init \
-    $RUNTIME_FLAG \
+    "${RUNTIME_FLAG[@]}" \
     --cap-drop=ALL \
     --cap-add=CHOWN \
     --cap-add=SETUID \
@@ -484,15 +493,15 @@ docker run --rm -it \
     --env-file "$ENVFILE" \
     --shm-size=64m \
     -v "$PROJECT_DIR":/workspace \
-    $GITCONFIG_MOUNT \
+    "${GITCONFIG_MOUNT[@]}" \
     -v "$SCRIPT_DIR/config/firewall-allowlist.conf":/etc/firewall-allowlist.conf:ro \
-    $CLAUDE_MOUNT_FLAGS \
-    $SYNC_BACK_FLAGS \
+    "${CLAUDE_MOUNT_FLAGS[@]}" \
+    "${SYNC_BACK_FLAGS[@]}" \
     -v "$ENTRYPOINT_LOG":/run/entrypoint.log \
     -v "$GIT_CONFIG_HASH_FILE":/run/git-config-hash \
     -e ENTRYPOINT_LOG=/run/entrypoint.log \
     -e PROJECT_PATH="$PROJECT_DIR" \
-    $ADD_HOST_FLAGS \
+    "${ADD_HOST_FLAGS[@]}" \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
 DOCKER_EXIT=$?
@@ -551,13 +560,11 @@ if [ -n "$ENTRYPOINT_HASH" ]; then
         echo ""
         echo "[sandbox] WARNING: .git/config was modified during the session!"
         echo "[sandbox] Auto-restoring from pre-session backup and re-sanitizing..."
-        # H7 Round 10 fix: Check if .git/config is a symlink before copying.
-        # Prevents arbitrary host file overwrite via symlink attack.
-        if [ -L "$PROJECT_DIR/.git/config" ]; then
-            echo "[sandbox] DANGER: .git/config is a symlink — removing it"
-            rm -f "$PROJECT_DIR/.git/config"
-        fi
-        cp "$GIT_CONFIG_BACKUP" "$PROJECT_DIR/.git/config"
+        # R12-H02 fix: Atomic restore — write to temp, mv replaces any symlink.
+        # Eliminates TOCTOU race between symlink check and copy.
+        _restore_tmp=$(mktemp "$PROJECT_DIR/.git/.config.restored.XXXXXX")
+        cp "$GIT_CONFIG_BACKUP" "$_restore_tmp"
+        mv -f "$_restore_tmp" "$PROJECT_DIR/.git/config"
         # Re-apply the same sanitization the entrypoint performed, so we don't
         # restore dangerous keys that were in the original config.
         # Updated to match entrypoint M1 & H9 fixes
@@ -571,10 +578,11 @@ if [ -n "$ENTRYPOINT_HASH" ]; then
         # Remove all [includeIf "..."] sections (--remove-section can't match these;
         # see entrypoint.sh comment for details)
         if grep -q '^\[includeIf ' "$PROJECT_DIR/.git/config" 2>/dev/null; then
-            _tmp="$PROJECT_DIR/.git/.includeif-strip.tmp"
+            # R12-H03 fix: Use mktemp instead of predictable temp file path
+            _tmp=$(mktemp "$PROJECT_DIR/.git/.includeif-strip.XXXXXX")
             awk '/^\[includeIf /{ skip=1; next } /^\[/{ skip=0 } !skip{ print }' \
                 "$PROJECT_DIR/.git/config" > "$_tmp" && mv "$_tmp" "$PROJECT_DIR/.git/config"
-            rm -f "$_tmp"
+            rm -f "$_tmp"  # cleanup on awk failure
         fi
         echo "[sandbox] .git/config restored. Review with: git config --local --list"
     fi
@@ -583,12 +591,10 @@ elif [ -n "$GIT_CONFIG_HASH_PRE" ] && [ "$GIT_CONFIG_HASH_PRE" != "$POST_GIT_CON
     echo ""
     echo "[sandbox] WARNING: .git/config was modified during the session!"
     echo "[sandbox] Auto-restoring .git/config from pre-session backup..."
-    # H7 Round 10 fix: Check for symlink before restore
-    if [ -L "$PROJECT_DIR/.git/config" ]; then
-        echo "[sandbox] DANGER: .git/config is a symlink — removing it"
-        rm -f "$PROJECT_DIR/.git/config"
-    fi
-    cp "$GIT_CONFIG_BACKUP" "$PROJECT_DIR/.git/config"
+    # R12-H02 fix: Atomic restore via temp + mv (safe against symlink attacks)
+    _restore_tmp=$(mktemp "$PROJECT_DIR/.git/.config.restored.XXXXXX")
+    cp "$GIT_CONFIG_BACKUP" "$_restore_tmp"
+    mv -f "$_restore_tmp" "$PROJECT_DIR/.git/config"
     echo "[sandbox] .git/config restored. Review with: git config --local --list"
 fi
 rm -f "$GIT_CONFIG_BACKUP" 2>/dev/null || true
@@ -644,7 +650,7 @@ fi
 # H7 Round 10 fix: Modification-based detection avoids false positives on
 # pre-existing files (e.g., Makefile that wasn't changed during the session)
 AUDIT_WARNINGS=""
-for _sf in $SUSPECT_FILES; do
+for _sf in "${SUSPECT_FILES[@]}"; do
     _full="$PROJECT_DIR/$_sf"
     if [ -e "$_full" ]; then
         if [ -f "$_full" ]; then

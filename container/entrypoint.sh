@@ -21,29 +21,35 @@ CLAUDE_DIR="/home/claude/.claude"
 
 if [ -d "$HOST_CLAUDE" ]; then
     # 1. Config (required for onboarding flags, user prefs, account info)
-    cp -P "$HOST_CLAUDE/.config.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/.config.json" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 2. Settings (copied as read snapshot — container edits don't propagate to host)
-    cp -P "$HOST_CLAUDE/settings.json" "$CLAUDE_DIR/" 2>/dev/null || true
-    cp -P "$HOST_CLAUDE/settings.local.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/settings.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/settings.local.json" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 2b. Status line script (referenced by settings.json statusLine command)
-    cp -P "$HOST_CLAUDE/statusline-command.sh" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/statusline-command.sh" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 3. User-level CLAUDE.md (project context, memory)
-    cp -P "$HOST_CLAUDE/CLAUDE.md" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/CLAUDE.md" "$CLAUDE_DIR/" 2>/dev/null || true
 
     # 4. Full history (needed for --continue/--resume to find past sessions)
-    cp -P "$HOST_CLAUDE/history.jsonl" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/history.jsonl" "$CLAUDE_DIR/" 2>/dev/null || true
     # Record baseline line count so sync-back can send only new entries
     wc -l < "$CLAUDE_DIR/history.jsonl" 2>/dev/null > "$CLAUDE_DIR/.history-baseline-lines" || true
 
     # Rewrite host project path → /workspace in history.jsonl so that sessions
     # from prior container runs AND host-native sessions are all discoverable
     # by Claude Code (which filters --continue/--resume by CWD = /workspace).
+    # R12-H01 fix: Use jq for JSON rewriting — eliminates regex injection,
+    # substring matching, and BRE escaping bugs from the sed approach.
     if [ -n "${PROJECT_PATH:-}" ] && [ -f "$CLAUDE_DIR/history.jsonl" ]; then
-        sed -i "s|\"project\":\"${PROJECT_PATH}\"|\"project\":\"/workspace\"|g" \
-            "$CLAUDE_DIR/history.jsonl" 2>/dev/null || true
+        _tmp=$(mktemp "$CLAUDE_DIR/history.jsonl.XXXXXX")
+        jq -c --arg old "$PROJECT_PATH" --arg new "/workspace" \
+            'if .project == $old then .project = $new else . end' \
+            "$CLAUDE_DIR/history.jsonl" > "$_tmp" 2>/dev/null \
+            && mv "$_tmp" "$CLAUDE_DIR/history.jsonl" \
+            || rm -f "$_tmp"
     fi
 
     # 5. Current project data ONLY: memory + session transcripts
@@ -58,37 +64,37 @@ if [ -d "$HOST_CLAUDE" ]; then
         HOST_ENCODED=$(echo "$PROJECT_PATH" | sed 's|/|-|g')
         if [ -d "$HOST_CLAUDE/projects/$HOST_ENCODED" ]; then
             mkdir -p "$CLAUDE_DIR/projects/$ENCODED_PATH"
-            cp -rP "$HOST_CLAUDE/projects/$HOST_ENCODED/." \
+            cp -rL "$HOST_CLAUDE/projects/$HOST_ENCODED/." \
                   "$CLAUDE_DIR/projects/$ENCODED_PATH/" 2>/dev/null || true
         fi
     elif [ -d "$HOST_CLAUDE/projects/$ENCODED_PATH" ]; then
         mkdir -p "$CLAUDE_DIR/projects/$ENCODED_PATH"
-        cp -rP "$HOST_CLAUDE/projects/$ENCODED_PATH/." \
+        cp -rL "$HOST_CLAUDE/projects/$ENCODED_PATH/." \
               "$CLAUDE_DIR/projects/$ENCODED_PATH/" 2>/dev/null || true
     fi
 
     # 6. Statsig cache (avoids re-fetching feature flags)
     if [ -d "$HOST_CLAUDE/statsig" ]; then
-        cp -rP "$HOST_CLAUDE/statsig" "$CLAUDE_DIR/" 2>/dev/null || true
+        cp -rL "$HOST_CLAUDE/statsig" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
     # 7. Plugins (if any installed)
     if [ -d "$HOST_CLAUDE/plugins" ]; then
-        cp -rP "$HOST_CLAUDE/plugins" "$CLAUDE_DIR/" 2>/dev/null || true
+        cp -rL "$HOST_CLAUDE/plugins" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
     # 7b. Plans (persist across sessions for plan-mode workflows)
     if [ -d "$HOST_CLAUDE/plans" ]; then
-        cp -rP "$HOST_CLAUDE/plans" "$CLAUDE_DIR/" 2>/dev/null || true
+        cp -rL "$HOST_CLAUDE/plans" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
     # 7c. Todos (persist across sessions)
     if [ -d "$HOST_CLAUDE/todos" ]; then
-        cp -rP "$HOST_CLAUDE/todos" "$CLAUDE_DIR/" 2>/dev/null || true
+        cp -rL "$HOST_CLAUDE/todos" "$CLAUDE_DIR/" 2>/dev/null || true
     fi
 
     # 8. Stats cache
-    cp -P "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
+    cp -L "$HOST_CLAUDE/stats-cache.json" "$CLAUDE_DIR/" 2>/dev/null || true
 fi
 
 echo "=== Entrypoint $(date) ===" >> "$LOGFILE"
@@ -145,9 +151,14 @@ sync_back_on_exit() {
         # Rewrite /workspace → host project path in history.jsonl so that
         # container sessions are discoverable by host-native Claude Code
         # (which filters --continue/--resume by the real host CWD).
+        # R12-H01 fix: Use jq for JSON rewriting (see inbound comment for rationale)
         if [ -n "${PROJECT_PATH:-}" ] && [ -f "$STAGING/history.jsonl" ]; then
-            sed -i "s|\"project\":\"/workspace\"|\"project\":\"${PROJECT_PATH}\"|g" \
-                "$STAGING/history.jsonl" 2>/dev/null || true
+            _tmp=$(mktemp "$STAGING/history.jsonl.XXXXXX")
+            jq -c --arg old "/workspace" --arg new "$PROJECT_PATH" \
+                'if .project == $old then .project = $new else . end' \
+                "$STAGING/history.jsonl" > "$_tmp" 2>/dev/null \
+                && mv "$_tmp" "$STAGING/history.jsonl" \
+                || rm -f "$_tmp"
         fi
     fi
 }
@@ -282,10 +293,11 @@ if [ -f /workspace/.git/config ]; then
     # (e.g., [includeIf "gitdir:/path/"]) so --remove-section includeIf silently fails
     # (no bare [includeIf] section exists). Use awk to strip them from the raw file.
     if grep -q '^\[includeIf ' /workspace/.git/config 2>/dev/null; then
-        _tmp="/workspace/.git/.includeif-strip.tmp"
+        # R12-H03 fix: Use mktemp instead of predictable temp file path
+        _tmp=$(mktemp /workspace/.git/.includeif-strip.XXXXXX)
         awk '/^\[includeIf /{ skip=1; next } /^\[/{ skip=0 } !skip{ print }' \
             /workspace/.git/config > "$_tmp" && mv "$_tmp" /workspace/.git/config
-        rm -f "$_tmp"
+        rm -f "$_tmp"  # cleanup on awk failure
     fi
     # Write post-sanitization hash so the host can compare against a clean baseline
     # (not the pre-sanitization snapshot). Written next to the entrypoint log mount.

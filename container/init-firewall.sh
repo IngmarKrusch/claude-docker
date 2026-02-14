@@ -26,7 +26,13 @@ if [ -n "$DOCKER_DNS_RULES" ]; then
     _log "Restoring Docker DNS rules..."
     iptables -t nat -N DOCKER_OUTPUT 2>/dev/null || true
     iptables -t nat -N DOCKER_POSTROUTING 2>/dev/null || true
-    echo "$DOCKER_DNS_RULES" | xargs -L 1 iptables -t nat
+    # R12-M07 fix: Replace xargs with while read loop (xargs without -0 is fragile).
+    # Subshell resets IFS to default (script sets IFS=$'\n\t' which lacks space,
+    # so unquoted $_rule wouldn't be word-split into separate iptables arguments).
+    while IFS= read -r _rule; do
+        [ -z "$_rule" ] && continue
+        (IFS=$' \t\n'; iptables -t nat $_rule)
+    done <<< "$DOCKER_DNS_RULES"
 else
     _log "No Docker DNS rules to restore"
 fi
@@ -86,6 +92,11 @@ else
     _log "Host network detected as: $HOST_NETWORK (from $DEFAULT_IF)"
 fi
 
+# R12-C03 fix: Block cloud metadata endpoints (AWS/GCP/Azure) — prevent credential
+# leakage on cloud VMs. Must come before host network allow rules.
+iptables -A OUTPUT -d 169.254.169.254/32 -j DROP
+iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
+
 # Set up remaining iptables rules
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
 iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
@@ -94,6 +105,11 @@ iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT DROP
+
+# R12-M05 fix: Defense-in-depth — IPv6 disabled via sysctl, but set DROP policy as backup
+ip6tables -P INPUT DROP 2>/dev/null || true
+ip6tables -P OUTPUT DROP 2>/dev/null || true
+ip6tables -P FORWARD DROP 2>/dev/null || true
 
 # First allow established connections for already approved traffic
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
