@@ -43,13 +43,20 @@ if [ -d "$HOST_CLAUDE" ]; then
     # by Claude Code (which filters --continue/--resume by CWD = /workspace).
     # R12-H01 fix: Use jq for JSON rewriting — eliminates regex injection,
     # substring matching, and BRE escaping bugs from the sed approach.
+    # R14 fix: Use jq -R -r with try/catch for per-line error handling.
+    # Plain jq -c exits with code 5 on any malformed line (truncated write,
+    # empty line), aborting the entire rewrite. This approach transforms valid
+    # JSON lines and passes through malformed lines unchanged.
     if [ -n "${PROJECT_PATH:-}" ] && [ -f "$CLAUDE_DIR/history.jsonl" ]; then
         _tmp=$(mktemp "$CLAUDE_DIR/history.jsonl.XXXXXX")
-        jq -c --arg old "$PROJECT_PATH" --arg new "/workspace" \
-            'if .project == $old then .project = $new else . end' \
-            "$CLAUDE_DIR/history.jsonl" > "$_tmp" 2>/dev/null \
+        jq -R -r --arg old "$PROJECT_PATH" --arg new "/workspace" '
+          . as $raw | try (fromjson | if .project == $old then .project = $new else . end | tojson) catch $raw
+        ' "$CLAUDE_DIR/history.jsonl" > "$_tmp" \
             && mv "$_tmp" "$CLAUDE_DIR/history.jsonl" \
             || rm -f "$_tmp"
+        # R14 diagnostic: log count of sessions mapped to /workspace
+        _ws_count=$(grep -c '"project":"/workspace"' "$CLAUDE_DIR/history.jsonl" 2>/dev/null || echo 0)
+        log "[sandbox] History rewritten: $_ws_count session(s) mapped to /workspace"
     fi
 
     # 5. Current project data ONLY: memory + session transcripts
@@ -154,13 +161,20 @@ sync_back_on_exit() {
         # container sessions are discoverable by host-native Claude Code
         # (which filters --continue/--resume by the real host CWD).
         # R12-H01 fix: Use jq for JSON rewriting (see inbound comment for rationale)
+        # R14 fix: Use jq -R -r with try/catch for per-line resilience
         if [ -n "${PROJECT_PATH:-}" ] && [ -f "$STAGING/history.jsonl" ]; then
             _tmp=$(mktemp "$STAGING/history.jsonl.XXXXXX")
-            jq -c --arg old "/workspace" --arg new "$PROJECT_PATH" \
-                'if .project == $old then .project = $new else . end' \
-                "$STAGING/history.jsonl" > "$_tmp" 2>/dev/null \
+            jq -R -r --arg old "/workspace" --arg new "$PROJECT_PATH" '
+              . as $raw | try (fromjson | if .project == $old then .project = $new else . end | tojson) catch $raw
+            ' "$STAGING/history.jsonl" > "$_tmp" \
                 && mv "$_tmp" "$STAGING/history.jsonl" \
                 || rm -f "$_tmp"
+
+            # R14 diagnostic: Warn if outbound rewrite left /workspace entries
+            _ws_remaining=$(grep -c '"project":"/workspace"' "$STAGING/history.jsonl" 2>/dev/null || echo 0)
+            if [ "$_ws_remaining" -gt 0 ]; then
+                echo "[sandbox] WARNING: $_ws_remaining history entries still have project=/workspace after outbound rewrite" >> "$LOGFILE" 2>/dev/null || true
+            fi
         fi
     fi
 }

@@ -7,9 +7,13 @@ log() { echo "$1"; LAUNCH_LOG+="$1"$'\n'; }
 
 # M9 Round 10 fix: Sanitize ANSI escape sequences to prevent terminal injection
 # Removes CSI sequences (ESC[...X), OSC sequences (ESC]...BEL), DCS sequences
-# (ESC P...ST), 8-bit C1 control codes (0x80-0x9F), and bare escapes
+# (ESC P...ST), 8-bit C1 control codes (0x80-0x9F), and bare escapes.
+# R14 fix: BSD sed doesn't support \x hex escapes inside bracket expressions —
+# [\x80-\x9f] matches literal chars including A-Z and 0-9. Use tr with octal
+# escapes for 8-bit C1 stripping (works on both macOS BSD and GNU).
 sanitize_ansi() {
-    LC_ALL=C sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1bP[^\x1b]*\x1b\\//g; s/[\x80-\x9f]//g; s/\x1b[^[]\{0,2\}//g'
+    LC_ALL=C sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1bP[^\x1b]*\x1b\\//g; s/\x1b[^[]\{0,2\}//g' \
+        | LC_ALL=C tr -d '\200-\237'
 }
 
 usage() {
@@ -679,8 +683,21 @@ if [ -n "$AUDIT_WARNINGS" ]; then
     echo "[sandbox] Use 'git diff' to inspect changes."
 fi
 
-SESSION_ID=$(tail -1 "$HOME/.claude/history.jsonl" 2>/dev/null \
-    | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('sessionId',''))" 2>/dev/null || true)
+# R14 fix: Filter history.jsonl by PROJECT_DIR — tail -1 returns the most recent
+# entry across ALL projects, which is wrong when host-native sessions run concurrently.
+SESSION_ID=$(python3 -c "
+import json, sys
+project = sys.argv[1]
+last = ''
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        if d.get('project') == project:
+            last = d.get('sessionId', '')
+    except:
+        pass
+print(last)
+" "$PROJECT_DIR" < "$HOME/.claude/history.jsonl" 2>/dev/null || true)
 
 if [ -n "$LAUNCH_LOG" ] || [ -n "$SESSION_ID" ]; then
     echo ""
