@@ -425,6 +425,11 @@ chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/nul
 chown root:root "$GITCONFIG" 2>/dev/null || true
 chmod 444 "$GITCONFIG" 2>/dev/null || true
 
+# R17-M4: Lock down host entrypoint log after init (best-effort on virtiofs)
+if [ -n "$HOST_LOG" ]; then
+    chmod 444 "$HOST_LOG" 2>/dev/null || true
+fi
+
 # Validate TERM has a matching terminfo entry. Host values like xterm-kitty
 # may lack entries even with ncurses-term installed. Try stripping the xterm-
 # prefix (e.g. xterm-kitty -> kitty) before falling back to xterm-256color.

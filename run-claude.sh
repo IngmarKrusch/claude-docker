@@ -371,7 +371,16 @@ GIT_CONFIG_HASH_PRE=$(shasum -a 256 "$PROJECT_DIR/.git/config" 2>/dev/null | cut
 # the hash. It writes the post-sanitization hash to GIT_CONFIG_HASH_FILE so
 # we compare against the clean baseline, not the pre-sanitization state.
 GIT_CONFIG_HASH_FILE=$(mktemp)
-HOOKS_LISTING=$(ls -la "$PROJECT_DIR/.git/hooks/" 2>/dev/null || true)
+# R17-C5: Per-hook SHA-256 baseline for modification detection (interactive review)
+PRE_HOOKS_HASHES=""
+if [ -d "$PROJECT_DIR/.git/hooks" ]; then
+    for _hf in "$PROJECT_DIR/.git/hooks/"*; do
+        [ -f "$_hf" ] || continue
+        case "$_hf" in *.sample) continue ;; esac
+        _hh=$(shasum -a 256 "$_hf" 2>/dev/null | cut -d' ' -f1)
+        PRE_HOOKS_HASHES+="$(basename "$_hf")=$_hh"$'\n'
+    done
+fi
 
 # Snapshot pre-existing dangerous keys in .git/config for modification-based post-exit audit
 # (mirrors the suspect-file pattern — avoids false positives on pre-existing keys like remote.origin)
@@ -611,21 +620,44 @@ elif [ -n "$GIT_CONFIG_HASH_PRE" ] && [ "$GIT_CONFIG_HASH_PRE" != "$POST_GIT_CON
 fi
 rm -f "$GIT_CONFIG_BACKUP" 2>/dev/null || true
 
-# 2. Detect new hooks (non-.sample files added to .git/hooks/)
-POST_HOOKS_LISTING=$(ls -la "$PROJECT_DIR/.git/hooks/" 2>/dev/null || true)
-if [ "$HOOKS_LISTING" != "$POST_HOOKS_LISTING" ]; then
-    NEW_HOOKS=""
+# 2. R17-C5: Interactive review of new/modified hooks (default: deny/delete)
+if [ -d "$PROJECT_DIR/.git/hooks" ]; then
     for hook in "$PROJECT_DIR/.git/hooks/"*; do
         [ -f "$hook" ] || continue
         case "$hook" in *.sample) continue ;; esac
-        # M9 Round 10 fix: Sanitize hook paths before output (filenames can contain ANSI escapes)
-        NEW_HOOKS+="  - $(echo "$hook" | sanitize_ansi)"$'\n'
-    done
-    if [ -n "$NEW_HOOKS" ]; then
+        _hook_name=$(basename "$hook")
+        _hook_display=$(echo "$_hook_name" | sanitize_ansi)
+        _hook_hash=$(shasum -a 256 "$hook" 2>/dev/null | cut -d' ' -f1)
+        _pre_hash=$(printf '%s\n' "$PRE_HOOKS_HASHES" | grep -F "${_hook_name}=" | head -1 | cut -d= -f2-)
+
+        # Skip hooks that existed before and haven't changed
+        [ -n "$_pre_hash" ] && [ "$_pre_hash" = "$_hook_hash" ] && continue
+
+        # This hook is NEW or MODIFIED — prompt user
         echo ""
-        echo "[sandbox] WARNING: New git hooks detected — these execute automatically on git operations:"
-        printf '%s' "$NEW_HOOKS"
-    fi
+        if [ -z "$_pre_hash" ]; then
+            echo "[sandbox] WARNING: NEW git hook detected: .git/hooks/$_hook_display"
+        else
+            echo "[sandbox] WARNING: MODIFIED git hook detected: .git/hooks/$_hook_display"
+        fi
+        echo "[sandbox] Content preview:"
+        # Sanitize content for display (first 15 lines)
+        head -15 "$hook" | sanitize_ansi | sed 's/^/  /'
+        _total_lines=$(wc -l < "$hook" 2>/dev/null || echo 0)
+        [ "$_total_lines" -gt 15 ] && echo "  ... ($_total_lines lines total)"
+        echo ""
+        printf '[sandbox] Keep this hook? [y/N]: '
+        read -r _answer < /dev/tty || _answer=""
+        case "$_answer" in
+            [yY]|[yY][eE][sS])
+                echo "[sandbox] Hook kept: .git/hooks/$_hook_display"
+                ;;
+            *)
+                rm -f "$hook"
+                echo "[sandbox] Hook removed: .git/hooks/$_hook_display"
+                ;;
+        esac
+    done
 fi
 
 # 3. Scan .git/config for dangerous keys — only warn about NEW keys (not pre-existing)
