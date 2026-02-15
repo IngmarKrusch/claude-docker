@@ -34,12 +34,15 @@ For setup and usage, see the [README](../README.md). For security model and hard
 │  │  │  Mounts:                                 │  │  │
 │  │  │   /workspace       ← project dir (rw)    │  │  │
 │  │  │   /mnt/.claude-host← staged data (ro)     │  │  │
-│  │  │   ~/.claude        ← tmpfs (rw, 512m)    │  │  │
-│  │  │   /tmp             ← tmpfs (noexec,512m) │  │  │
-│  │  │   ~/.npm           ← tmpfs (noexec,256m) │  │  │
-│  │  │   ~/.config        ← tmpfs (64m)         │  │  │
+│  │  │   ~/.claude        ← tmpfs (nosuid,512m)  │  │  │
+│  │  │   /tmp             ← tmpfs (noexec,nosuid,512m) │  │  │
+│  │  │   ~/.npm           ← tmpfs (noexec,nosuid,256m) │  │  │
+│  │  │   ~/.config        ← tmpfs (nosuid,64m)  │  │  │
 │  │  │   /run             ← tmpfs (nosuid,noexec,1m) │  │  │
 │  │  │   /dev/shm         ← 64m                 │  │  │
+│  │  │   /etc/firewall-allowlist.conf ← bind (ro)│  │  │
+│  │  │   /tmp/host-gitconfig ← bind (ro,if exists)│  │  │
+│  │  │   ~/.claude-sync   ← bind (rw, if sync)   │  │  │
 │  │  │                                          │  │  │
 │  │  │  Credential flow:                        │  │  │
 │  │  │   --env-file (tmpfile, deleted 2s)       │  │  │
@@ -54,18 +57,19 @@ For setup and usage, see the [README](../README.md). For security model and hard
 ## Entrypoint Lifecycle
 
 1. **Mount isolation** — copy session data from host-side staging dir (`/mnt/.claude-host`, contains only needed files) to writable tmpfs (`~/.claude`). Uses `cp -L` (dereference symlinks — prevents symlink-following attacks). Project data loaded using host-side `PROJECT_PATH` encoding for per-project isolation.
-2. **Push flag** — create `/run/sandbox-flags/allow-git-push` if `--allow-git-push` was passed (root-owned, immutable after privilege drop)
-3. **Firewall** — initialize iptables allowlist, IPv6 disable, port restrictions (443/80), DNS blocked for claude user (pre-resolved via `/etc/hosts`), SSH blocking, connectivity verification. **Firewall init failure is fatal** — container exits if network restrictions cannot be established.
-4. **Credentials** — write OAuth tokens to file, schedule background scrub (best-effort urandom overwrite + delete after 1s — may persist if CC re-creates the file)
-5. **Git config** — build global gitconfig from host (`~/.gitconfig` mount guarded — only mounted if file exists on host), strip host credential helpers, set `core.hooksPath=/dev/null`, strip `filter` section (prevents command injection via LFS filter definitions)
-6. **Git config sanitization** — strip dangerous keys from workspace `.git/config` (all git-guard blocked keys/sections), write post-sanitization SHA-256 hash to **immutable root-owned file** (`chmod 444`, prevents tampering with tamper detection baseline)
-7. **GitHub credentials** — feed token into `git credential-cache` (memory-only), scoped to workspace repo via `useHttpPath`
-8. **Privilege drop** — `setpriv` to UID 501 with empty bounding set and no inheritable capabilities. Global gitconfig locked to `root:root` mode `444` before drop. When sync-back is enabled, child process is waited on SIGTERM to prevent sync-back racing with still-running child.
+2. **Sync-back trap** — register EXIT trap that stages session data for sync-back on clean exit (rsync to `/home/claude/.claude-sync/`). History entries appended via append-only mechanism. Project data relocated from container's `-workspace` encoding to host-encoded path.
+3. **Push flag** — create `/run/sandbox-flags/allow-git-push` if `--allow-git-push` was passed (root-owned, immutable after privilege drop)
+4. **Firewall** — initialize iptables allowlist, IPv6 disable, port restrictions (443/80), DNS blocked for claude user (pre-resolved via `/etc/hosts`), SSH blocking, connectivity verification. **Firewall init failure is fatal** — container exits if network restrictions cannot be established.
+5. **Credentials** — write OAuth tokens to file, schedule background scrub (best-effort urandom overwrite + delete after 1s — may persist if CC re-creates the file)
+6. **Git config** — build global gitconfig from host (`~/.gitconfig` mount guarded — only mounted if file exists on host), strip host credential helpers, set `core.hooksPath=/dev/null`, strip `filter` section (prevents command injection via LFS filter definitions)
+7. **Git config sanitization** — strip dangerous keys from workspace `.git/config` (all git-guard blocked keys/sections), lock `.git/config` to `root:root` mode `444`. Write post-sanitization SHA-256 hash to **immutable root-owned file** (`chmod 444`, prevents tampering with tamper detection baseline)
+8. **GitHub credentials** — feed token into `git credential-cache` (memory-only), scoped to workspace repo via `useHttpPath`
+9. **Privilege drop** — `setpriv` to UID 501 with empty bounding set and no inheritable capabilities. Global gitconfig locked to `root:root` mode `444` before drop. When sync-back is enabled, child process is waited on SIGTERM to prevent sync-back racing with still-running child.
 
 ## Post-Exit Lifecycle
 
-1. **Sync-back** — rsync session artifacts from container staging dir to host `~/.claude/` (if enabled). Uses `--no-links` (skips all symlinks). Project data relocated from `-workspace` to host-encoded path before sync. Excludes `settings.json`, `settings.local.json`, `statusline-command.sh`, `CLAUDE.md`, `.credentials.json`, `.config.json` / `.config.json.backup.*`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines`.
-2. **`.git/config` tamper detection** — compare SHA-256 hash against immutable post-sanitization baseline; **check for symlink attacks** before restore (prevents arbitrary host file overwrite); auto-restore from pre-session backup and re-apply full sanitization if modified
+1. **Sync-back** — rsync session artifacts from container staging dir to host `~/.claude/` (if enabled). Uses `--no-links` (skips all symlinks). Project data relocated from `-workspace` to host-encoded path before sync. Excludes `settings.json`, `settings.local.json`, `statusline-command.sh`, `CLAUDE.md`, `.credentials.json`, `.config.json` / `.config.json.backup.*`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines`, `history.jsonl` (synced separately via append-only mechanism).
+2. **`.git/config` tamper detection** — compare SHA-256 hash against immutable post-sanitization baseline; **atomic restore via mktemp+mv** (replaces any symlink at the target path, preventing arbitrary host file overwrite); auto-restore from pre-session backup and re-apply full sanitization if modified
 3. **Hook detection** — warn about new non-`.sample` files in `.git/hooks/`. **ANSI escape sequences sanitized** to prevent terminal injection.
 4. **Dangerous config scan** — check `.git/config` for **all git-guard blocked keys** (comprehensive coverage of exact keys and prefix-based sections)
 5. **Suspect file warnings** — detect `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, and others (35 patterns total) that were **created or modified** during the session (pre/post SHA-256 comparison). **ANSI escape sequences sanitized**.
@@ -83,7 +87,7 @@ Expired credentials are automatically detected on container start and replaced w
 **Root** — build entry point, user-facing scripts, metadata:
 - **Dockerfile** — Debian Bookworm slim base, Claude Code native binary, guard library compilation, `setpriv` for privilege drop
 - **run-claude.sh** — Host launcher: keychain extraction, token refresh, host-side staging of `~/.claude`, DNS pre-resolution, image build, hardened container launch, post-exit workspace audit, sync-back merge
-- **lint.sh** — Runs Hadolint on Dockerfile via Docker
+- **lint.sh** — Runs Hadolint on Dockerfile and shellcheck on all shell scripts via Docker
 - **.githooks/pre-commit** — Runs lint on commit; enable with `git config core.hooksPath .githooks`
 
 **container/** — files COPY'd into the Docker image:
@@ -103,8 +107,8 @@ Expired credentials are automatically detected on container start and replaced w
 - **docs/ARCHITECTURE.md** — This file: architecture overview, entrypoint lifecycle, file reference, development guide
 - **docs/audit/SECURITY-AUDIT-REPORT.md** — Initial comprehensive security audit report
 - **docs/audit/ROUND-10-IMPLEMENTATION.md** — Round 10 implementation notes
-- **docs/audit/FINDINGS.md** — Audit findings
-- **docs/audit/AUDIT-ROUND-10.md** — Round 10 audit details
+- **docs/audit/FINDINGS.md** — Cumulative audit findings
+- **docs/audit/AUDIT-ROUND-{10,11,12,13,16}.md** — Per-round audit details
 
 ## Development Workflow
 
@@ -122,7 +126,7 @@ This checks the latest Claude Code version, skips the rebuild if the image is al
 ./lint.sh
 ```
 
-Runs Hadolint on Dockerfile via Docker.
+Runs Hadolint on Dockerfile and shellcheck on all shell scripts (`run-claude.sh`, `lint.sh`, `entrypoint.sh`, `init-firewall.sh`, `reload-firewall.sh`, `git-wrapper.sh`) via Docker.
 
 ### Pre-commit hooks
 

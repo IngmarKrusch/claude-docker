@@ -9,7 +9,7 @@ Run Claude Code CLI in a hardened Docker container with defense-in-depth isolati
 - Claude Code installed on host (`curl -fsSL https://claude.ai/install.sh | bash`)
 - Logged in via `claude login` (credentials stored in keychain)
 - (Optional) GitHub CLI authenticated (`gh auth login`) — enables `git push` from the container
-- (Optional) `dig` command on host — used to pre-resolve DNS for allowlisted domains. Installed by default on macOS. If missing, the container falls back to internal DNS resolution.
+- `dig` command on host — used to pre-resolve DNS for allowlisted domains (installed by default on macOS). Required because DNS is fully blocked for the claude user inside the container — without `dig`, no `/etc/hosts` entries are created and the container will fail at startup.
 
 ## Setup
 

@@ -64,6 +64,8 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
 - `git push` blocked unless `/run/sandbox-flags/allow-git-push` exists (root-created flag file)
 - `git remote add/set-url/rename` blocked (prevents adding exfiltration targets)
 - `git submodule add` blocked (prevents pulling arbitrary repos)
+- `git clone --config` with blocked keys rejected (prevents config injection via clone)
+- `git credential fill` blocked (prevents trivial token extraction — see credential limitation below)
 - **`git config` with dangerous keys blocked** (comprehensive list covering all documented git escape vectors):
   - **Exact keys:** `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`, `credential.helper`, `include.path`, `core.gitProxy`, `core.askPass`
   - **Prefix-based blocking:** `url.*` (URL rewriting), `http.*` (proxy/SSL bypass), `remote.*` (remote manipulation), `credential.*` (all credential helper forms), `filter.*`, `alias.*`
@@ -104,7 +106,7 @@ Only the files needed for the current session are exposed to the container. `run
 
 Staged files (only these are visible inside the container):
 
-- `.config.json`, `settings.json`, `settings.local.json`, `CLAUDE.md` (read snapshots)
+- `.config.json`, `settings.json`, `settings.local.json`, `statusline-command.sh`, `CLAUDE.md` (read snapshots)
 - `history.jsonl` (for `--continue`/`--resume`)
 - Current project's `projects/<path>/` data (memory + transcripts) — **host project path** (`PROJECT_PATH`) is used for encoding to prevent cross-project data leakage (container's `/workspace` encoding is shared across all projects without this)
 - `statsig/`, `plugins/`, `plans/`, `todos/`, `stats-cache.json`
@@ -125,6 +127,7 @@ NOT exposed: `debug/`, `session-env/`, `file-history/`, `paste-cache/`, `cache/`
 - `statusline-command.sh` — prevents command injection via status line
 - `CLAUDE.md` (user-level) — prevents persistent prompt injection
 - `.config.json` / `.config.json.backup.*` — prevents poisoning of `allowedTools`, `mcpServers`, trust dialogs, and other security-relevant config fields that would take effect in future sessions
+- `history.jsonl` — excluded from rsync; new entries synced separately via append-only mechanism (prevents overwriting concurrent host-native sessions)
 - `.credentials.json`, `.gitconfig`, `entrypoint.log`, `.history-baseline-lines` — internal state files
 
 Use `--no-sync-back` to disable all sync-back. Project-level `/workspace/CLAUDE.md` is unaffected by this protection (writable via the workspace mount).
@@ -156,7 +159,7 @@ After this point: no capabilities in the bounding set, no inheritable caps, `no-
 
 After the container exits, `run-claude.sh` performs a workspace audit on the host:
 
-1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline (immutable root-owned file, prevents tampering). If modified during the session, **checks for symlink attacks** (prevents arbitrary host file overwrite), then auto-restores from pre-session backup and re-applies sanitization (strips all git-guard blocked keys/sections).
+1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline (immutable root-owned file, prevents tampering). If modified during the session, **atomic restore via mktemp+mv** (replaces any symlink at the target path, preventing arbitrary host file overwrite), then auto-restores from pre-session backup and re-applies sanitization (strips all git-guard blocked keys/sections).
 2. **Hook detection** — scans `.git/hooks/` for new non-`.sample` files added during the session. Output is **sanitized for ANSI escape sequences** to prevent terminal injection via crafted filenames.
 3. **Dangerous config key scan** — checks `.git/config` for **all git-guard blocked keys** (exact keys, prefix-based sections like `url.*`, `http.*`, `remote.*`, `credential.*`, `filter.*`, `alias.*`, `diff.*`, `merge.*`, `includeIf.*`) as a final safety net.
 4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox or inject persistent prompts: `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, `package.json`, `.npmrc`, `.eslintrc.js`, `jest.config.js`, `tsconfig.json`, `setup.py`, `pyproject.toml`, `.pre-commit-config.yaml`, `docker-compose.yml`, and others (30+ patterns). Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
@@ -182,7 +185,7 @@ Honest disclosure of defenses that were found ineffective and replaced or remove
 | What | Why it failed | Replaced with |
 |------|--------------|---------------|
 | `drop-dumpable.c` (wrapper: set `PR_SET_DUMPABLE=0` then exec git) | Kernel's `would_dump()` in `fs/exec.c` unconditionally resets `dumpable=1` on exec of readable binaries — the flag was overwritten before git even started | `nodump.so` via `/etc/ld.so.preload` — runs **after** exec, inside the new process |
-| Shell-level git credential `fill`/`get` blocking | Same-UID bypass: AI can `net.connect` directly to the credential cache socket, making git-level blocks cosmetic | Acknowledge limitation openly; recommend fine-grained PATs; add `--disallow-broad-gh-token` |
+| Shell-level git credential `fill`/`get` blocking | Same-UID bypass: AI can `net.connect` directly to the credential cache socket, making git-level blocks cosmetic | `git credential fill` still blocked by `git-guard.so` (defense-in-depth); acknowledge socket-level limitation openly; recommend fine-grained PATs; add `--disallow-broad-gh-token` |
 | 157-line `git-wrapper.sh` with 4-phase validation | Redundant with `git-guard.so` (binary-level enforcement); shell wrapper bypassable via direct `/usr/libexec/wrapped-git` call | 16-line wrapper that only forces `GIT_CONFIG_COUNT` env vars |
 | urandom overwrite of credential env vars | Bash doesn't guarantee in-place memory overwrite; process is about to `exec()` anyway | Simple `unset` before exec |
 | `sentry.io` in firewall allowlist | Accepts arbitrary POST data — usable as an exfiltration channel | Removed from allowlist + `DISABLE_ERROR_REPORTING=1` |
