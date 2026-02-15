@@ -132,9 +132,27 @@ static void git_guard_init(void) {
     unsetenv("VISUAL");
     unsetenv("EDITOR");
 
+    /* R17-01 fix: Clear config-redirect and pager env vars that bypass
+     * GIT_CONFIG_COUNT (which only forces 4 specific keys, not all config).
+     * GIT_CONFIG_GLOBAL/GIT_CONFIG allow reading filter.*, alias.*, etc.
+     * from unsanitized files. PAGER/LESSOPEN allow command execution via
+     * git output paging. GIT_DIR bypasses entrypoint .git/config sanitization. */
+    unsetenv("GIT_CONFIG_GLOBAL");
+    unsetenv("GIT_CONFIG");
+    unsetenv("GIT_DIR");
+    unsetenv("GIT_WORK_TREE");
+    unsetenv("GIT_INDEX_FILE");
+    unsetenv("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    unsetenv("GIT_COMMON_DIR");
+    unsetenv("PAGER");
+    unsetenv("LESSOPEN");
+    unsetenv("LESSCLOSE");
+
     /* Force security-critical git config via environment.
-     * GIT_CONFIG_COUNT overrides local/global gitconfig, preventing
-     * bypass via .git/config or GIT_CONFIG_GLOBAL. */
+     * GIT_CONFIG_COUNT forces these 4 specific keys with highest precedence,
+     * but does NOT suppress config file loading — other keys are still read
+     * from gitconfig files. The unsetenv() calls above prevent redirection
+     * to unsanitized config files via GIT_CONFIG_GLOBAL/GIT_CONFIG. */
     setenv("GIT_CONFIG_COUNT", "4", 1);
     setenv("GIT_CONFIG_KEY_0", "core.hooksPath", 1);
     setenv("GIT_CONFIG_VALUE_0", "/dev/null", 1);

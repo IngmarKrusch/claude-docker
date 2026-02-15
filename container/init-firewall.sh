@@ -98,6 +98,13 @@ fi
 iptables -A OUTPUT -d 169.254.169.254/32 -j DROP
 iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
 
+# R17-02 fix: Block dangerous ports to host subnet BEFORE general host network ACCEPT.
+# SSH (port 22) is an exfiltration channel; Docker API (2375/2376) enables container escape.
+# Must come before the host network ACCEPT rule (first-match-wins).
+iptables -A OUTPUT -d "$HOST_NETWORK" -p tcp --dport 22 -j DROP
+iptables -A OUTPUT -d "$HOST_NETWORK" -p tcp --dport 2375 -j DROP
+iptables -A OUTPUT -d "$HOST_NETWORK" -p tcp --dport 2376 -j DROP
+
 # Set up remaining iptables rules
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
 iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT

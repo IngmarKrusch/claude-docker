@@ -1,22 +1,24 @@
-# Audit Round 17 — Git Config Bypass & Firewall Rule Ordering
+# Audit Round 17 — Git Config Bypass, Firewall Rule Ordering & Post-Exit Hardening
 
 **Date:** 2026-02-15
 **Auditor:** Claude (Opus 4.6, running inside the sandbox)
-**Scope:** Git environment variable bypass, firewall rule ordering, container escape validation, network probing, suspect file coverage
-**Method:** Live red-team from inside the running container (7 parallel test groups)
+**Scope:** Git environment variable bypass, firewall rule ordering, container escape validation, network probing, suspect file coverage, post-exit hook review, entrypoint log lockdown
+**Method:** Live red-team from inside the running container (7 parallel test groups). Two additional findings (C5, M4) identified and implemented by a parallel audit session.
 
 ---
 
 ## Executive Summary
 
-Two exploitable vulnerabilities confirmed, one hypothesized issue disproven, and one coverage gap identified. The critical finding (R17-01) allows **arbitrary command execution via git filter drivers** by redirecting git to an unsanitized config file through the `GIT_CONFIG_GLOBAL` environment variable — bypassing all existing git-guard protections. Container escape, network firewall, and seccomp protections all hold (10/10 pass).
+Two exploitable vulnerabilities confirmed, one hypothesized issue disproven, one coverage gap identified, and two improvements implemented by a parallel session. The critical finding (R17-01) allows **arbitrary command execution via git filter drivers** by redirecting git to an unsanitized config file through the `GIT_CONFIG_GLOBAL` environment variable — bypassing all existing git-guard protections. Container escape, network firewall, and seccomp protections all hold (10/10 pass).
 
-| ID | Severity | Confidence | Finding |
-|----|----------|------------|---------|
-| R17-01 | **HIGH** | High | `GIT_CONFIG_GLOBAL` env var not cleared — arbitrary command execution via filter drivers |
-| R17-02 | **MEDIUM** | High | Firewall rule ordering allows SSH/Docker API to host subnet (dead code for SSH DROP) |
-| R17-03 | — | High | `/dev/shm` noexec — DISPROVEN (already hardened) |
-| R17-04 | **LOW** | High | 17 auto-executing files missing from post-exit `SUSPECT_FILES` audit |
+| ID | Severity | Confidence | Status | Finding |
+|----|----------|------------|--------|---------|
+| R17-01 | **HIGH** | High | **Implemented** | `GIT_CONFIG_GLOBAL` env var not cleared — arbitrary command execution via filter drivers |
+| R17-02 | **MEDIUM** | High | **Implemented** | Firewall rule ordering allows SSH/Docker API to host subnet (dead code for SSH DROP) |
+| R17-03 | — | High | Disproven | `/dev/shm` noexec — already hardened |
+| R17-04 | **LOW** | High | **Implemented** | 17 auto-executing files missing from post-exit `SUSPECT_FILES` audit |
+| R17-C5 | **MEDIUM** | High | **Implemented** | Post-exit hook review upgraded from passive warning to interactive review |
+| R17-M4 | **LOW** | High | **Implemented** | Entrypoint log lockdown (chmod 444 after init) |
 
 ---
 
@@ -191,6 +193,54 @@ The general SSH DROP on line 121 should remain for defense-in-depth (covers non-
 
 ---
 
+### R17-C5: Interactive Hook Review (MEDIUM) — IMPLEMENTED
+
+**Files:** `run-claude.sh:374-383,623-661`, `docs/SECURITY.md`, `docs/ARCHITECTURE.md`
+**Confidence:** High
+**Status:** Implemented in parallel session (commit 1f713b3)
+
+#### Description
+
+The post-exit hook detection was a passive warning that listed new hooks but took no action. An AI agent could plant a malicious git hook (e.g., `pre-commit` that exfiltrates code on every commit) and the user would only see a warning message that could be overlooked.
+
+#### Fix (Implemented)
+
+Upgraded from passive warning to **interactive per-hook review**:
+
+1. **Pre-session SHA-256 baseline** (`run-claude.sh:374-383`): Each non-`.sample` hook is hashed before the session. Hooks that existed unchanged are silently skipped at post-exit — no false positives.
+2. **Interactive review** (`run-claude.sh:623-661`): For each NEW or MODIFIED hook:
+   - Content preview (first 15 lines, ANSI-sanitized)
+   - Prompt: `Keep this hook? [y/N]` — default is **remove**
+   - Hook is deleted unless the user explicitly approves
+3. **Documentation updated**: SECURITY.md and ARCHITECTURE.md reflect the new interactive behavior.
+
+**Regression risk:** Low. Interactive prompt requires `/dev/tty` — will fail silently if not attached to a terminal (e.g., CI/CD piped usage). The `read -r _answer < /dev/tty || _answer=""` fallback defaults to remove, which is the safe choice.
+
+---
+
+### R17-M4: Entrypoint Log Lockdown (LOW) — IMPLEMENTED
+
+**File:** `container/entrypoint.sh:428-431`
+**Confidence:** High
+**Status:** Implemented in parallel session (commit 1f713b3)
+
+#### Description
+
+The entrypoint log file (`/run/entrypoint.log`) is a virtiofs-mounted host tempfile that was writable by the claude user after init. A malicious session could inject content into the log, potentially including ANSI escape sequences for terminal injection (mitigated by existing sanitization in `run-claude.sh`, but defense-in-depth is warranted). Originally identified as R13-07 (LOW, deferred).
+
+#### Fix (Implemented)
+
+```bash
+# R17-M4: Lock down host entrypoint log after init (best-effort on virtiofs)
+if [ -n "$HOST_LOG" ]; then
+    chmod 444 "$HOST_LOG" 2>/dev/null || true
+fi
+```
+
+**Limitation:** virtiofs on macOS may ignore `chmod` (documented behavior). The existing ANSI sanitization in `run-claude.sh` remains the primary protection. This is defense-in-depth.
+
+---
+
 ### R17-03: `/dev/shm` Noexec — DISPROVEN
 
 **File:** `run-claude.sh:476`
@@ -219,12 +269,12 @@ ERROR: ld.so: ... failed to map segment from shared object '/dev/shm/test.so': O
 
 ### R17-04: Missing SUSPECT_FILES Entries (LOW)
 
-**File:** `run-claude.sh:395`
+**File:** `run-claude.sh:404`
 **Confidence:** High
 
 #### Description
 
-The `SUSPECT_FILES` array (line 395) contains 34 entries for the post-exit workspace audit. Several auto-executing build/config files are missing. These files can execute arbitrary code when opened by IDEs, invoked by build tools, or triggered on directory entry.
+The `SUSPECT_FILES` array (line 404) contains 34 entries for the post-exit workspace audit. Several auto-executing build/config files are missing. These files can execute arbitrary code when opened by IDEs, invoked by build tools, or triggered on directory entry.
 
 #### Recommended Additions (17 files)
 
@@ -269,7 +319,7 @@ The `SUSPECT_FILES` array (line 395) contains 34 entries for the post-exit works
 
 #### Fix
 
-Append to the `SUSPECT_FILES` array on line 395 of `run-claude.sh`:
+Append to the `SUSPECT_FILES` array on line 404 of `run-claude.sh`:
 
 ```bash
 SUSPECT_FILES=(CLAUDE.md Justfile Taskfile.yml .envrc ... .cargo/config.toml
@@ -342,6 +392,11 @@ SUSPECT_FILES=(CLAUDE.md Justfile Taskfile.yml .envrc ... .cargo/config.toml
 
 ## Remediation Plan
 
+### Already Implemented (commit 1f713b3)
+
+**R17-C5:** Interactive hook review — post-exit hooks now require explicit user approval (default: deny/delete).
+**R17-M4:** Entrypoint log lockdown — `chmod 444` after init (best-effort on virtiofs).
+
 ### Priority 1 — Fix Immediately
 
 **R17-01:** Add 10 `unsetenv()` calls to `git-guard.c` + fix misleading comment. This is the only finding with proven arbitrary code execution.
@@ -356,7 +411,7 @@ SUSPECT_FILES=(CLAUDE.md Justfile Taskfile.yml .envrc ... .cargo/config.toml
 
 ### Documentation
 
-Update `SECURITY.md`, `ARCHITECTURE.md` to reflect all changes.
+Update `SECURITY.md`, `ARCHITECTURE.md` to reflect all changes (R17-01, R17-02, R17-04). C5 and M4 documentation was updated in commit 1f713b3.
 
 ---
 
@@ -366,8 +421,10 @@ Update `SECURITY.md`, `ARCHITECTURE.md` to reflect all changes.
 |-------|----------------|-------------|
 | R10 (H4) | Added initial env var clearing | R17-01 extends the list with 10 missing vars |
 | R10 (H2) | Restricted ipset to TCP 443/80 | R17-02 is a separate ordering issue within the same rule set |
+| R10 (M9) | ANSI-sanitized hook filenames in post-exit audit | R17-C5 replaces passive warning with interactive review |
 | R12 (C03) | Cloud metadata DROP before host network | R17-02 follows the same pattern — dangerous DROPs before general ACCEPT |
 | R13 (R13-05) | Added CLAUDE.md, Justfile, Taskfile.yml to SUSPECT_FILES | R17-04 continues expanding the same array |
+| R13 (R13-07) | Entrypoint log writable (deferred) | R17-M4 implements the fix (chmod 444) |
 | R16 (L1) | Added GIT_PAGER, GIT_SEQUENCE_EDITOR, VISUAL, EDITOR | R17-01 extends further with GIT_CONFIG_GLOBAL, GIT_CONFIG, PAGER, etc. |
 | R16 (L7) | Documented host subnet access | R17-02 narrows it by excluding dangerous ports |
 
@@ -375,7 +432,7 @@ Update `SECURITY.md`, `ARCHITECTURE.md` to reflect all changes.
 
 ## Verification Checklist
 
-- [x] All file:line references cross-checked against current codebase
+- [x] All file:line references cross-checked against current codebase (post-1f713b3)
 - [x] No accepted risks (documented in SECURITY.md) presented as bugs
 - [x] Host subnet access remains accepted; only SSH/Docker API ports narrowed
 - [x] R17-03 tested and disproven before proposing fix — correctly dropped
@@ -383,3 +440,22 @@ Update `SECURITY.md`, `ARCHITECTURE.md` to reflect all changes.
 - [x] Confidence ratings provided for all findings
 - [x] Regression risk assessed for each proposed fix
 - [x] Misleading code comment identified for correction (git-guard.c:135-137)
+- [x] Parallel session fixes (R17-C5, R17-M4) from commit 1f713b3 incorporated into report
+- [x] Line numbers updated to reflect run-claude.sh changes in 1f713b3 (SUSPECT_FILES: 395→404)
+
+---
+
+## Remediation Status
+
+All findings from this round have been addressed.
+
+| ID | Severity | Status | Implementation |
+|----|----------|--------|---------------|
+| R17-01 | HIGH | **Implemented** | Added 10 `unsetenv()` calls to `git-guard.c` (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `PAGER`, `LESSOPEN`, `LESSCLOSE`). Fixed misleading comment about `GIT_CONFIG_COUNT` scope. |
+| R17-02 | MEDIUM | **Implemented** | Inserted 3 `iptables -A OUTPUT -d $HOST_NETWORK -p tcp --dport {22,2375,2376} -j DROP` rules before the host network ACCEPT in `init-firewall.sh`. General SSH DROP on line 121 retained for defense-in-depth. |
+| R17-03 | — | **Disproven** | `/dev/shm` already has `noexec` (Docker default). No fix needed. |
+| R17-04 | LOW | **Implemented** | Added 17 entries to `SUSPECT_FILES` array in `run-claude.sh` (52 total): `build.gradle`, `build.gradle.kts`, `pom.xml`, `Vagrantfile`, `WORKSPACE`, `.mise.toml`, `.devcontainer/devcontainer.json`, `justfile`, `.justfile`, `Rakefile`, `Gemfile`, `babel.config.js`, `Tiltfile`, `Brewfile`, `deno.json`, `deno.jsonc`, `.ruby-version`. |
+| R17-C5 | MEDIUM | **Implemented** | Interactive hook review (commit 1f713b3). |
+| R17-M4 | LOW | **Implemented** | Entrypoint log lockdown (commit 1f713b3). |
+
+Documentation updated: `SECURITY.md` (env var list, SSH scope, host subnet, file count), `ARCHITECTURE.md` (firewall desc, file count).

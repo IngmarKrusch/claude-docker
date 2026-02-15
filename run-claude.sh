@@ -401,7 +401,18 @@ fi
 
 # H7 Round 10 fix: Snapshot suspect files for modification-based post-exit audit
 # (avoids false positives on pre-existing files that weren't changed)
-SUSPECT_FILES=(CLAUDE.md Justfile Taskfile.yml .envrc .vscode/settings.json .vscode/tasks.json Makefile .gitattributes .gitmodules .github/workflows package.json .npmrc .yarnrc.yml .eslintrc.js .eslintrc.cjs jest.config.js jest.config.ts vitest.config.ts vitest.config.js .prettierrc.js tsconfig.json setup.py setup.cfg pyproject.toml .pre-commit-config.yaml .tool-versions .node-version .nvmrc .python-version docker-compose.yml docker-compose.yaml lefthook.yml .husky CMakeLists.txt .cargo/config.toml)
+SUSPECT_FILES=(
+    CLAUDE.md Justfile Taskfile.yml .envrc .vscode/settings.json .vscode/tasks.json
+    Makefile .gitattributes .gitmodules .github/workflows package.json .npmrc .yarnrc.yml
+    .eslintrc.js .eslintrc.cjs jest.config.js jest.config.ts vitest.config.ts vitest.config.js
+    .prettierrc.js tsconfig.json setup.py setup.cfg pyproject.toml .pre-commit-config.yaml
+    .tool-versions .node-version .nvmrc .python-version docker-compose.yml docker-compose.yaml
+    lefthook.yml .husky CMakeLists.txt .cargo/config.toml
+    # R17-04: Additional auto-executing build/config files
+    build.gradle build.gradle.kts pom.xml Vagrantfile WORKSPACE .mise.toml
+    .devcontainer/devcontainer.json justfile .justfile Rakefile Gemfile
+    babel.config.js Tiltfile Brewfile deno.json deno.jsonc .ruby-version
+)
 PRE_SUSPECT=""
 for _sf in "${SUSPECT_FILES[@]}"; do
     if [ -e "$PROJECT_DIR/$_sf" ]; then

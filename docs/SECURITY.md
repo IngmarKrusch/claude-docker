@@ -42,13 +42,13 @@ Outbound traffic is restricted to an allowlist of resolved IPs via iptables + ip
 | DNS pinned to container resolver | All DNS goes through the internal resolver; direct external DNS blocked |
 | **DNS blocked for claude user** | All DNS queries from the claude user are dropped. Allowlisted domains are pre-resolved on the host and injected via `--add-host` (`/etc/hosts`). Root retains DNS for ipset population during init. Eliminates DNS tunneling exfiltration entirely. |
 | DNS packet size cap: 192 bytes | Defense-in-depth: drops oversized UDP DNS packets (normal queries are <128 bytes) |
-| SSH (port 22) blocked | Prevents raw TCP exfiltration via `github.com:22` (accepts connections without auth) |
+| **SSH (port 22) blocked** | Blocked to all destinations including host subnet (R17-02). Prevents raw TCP exfiltration via `github.com:22` (accepts connections without auth). |
 | Removed domains | `sentry.io` (arbitrary POST data), `statsig.com`/`statsig.anthropic.com` (arbitrary POST data), VS Code marketplace/blob/update domains (Azure CDN shared IPs — domain fronting risk) |
 | `DISABLE_ERROR_REPORTING=1` | Prevents Claude Code from attempting error reports even if allowlist is accidentally widened |
 | **Firewall init failure is fatal** | Container exits if firewall initialization fails — cannot start without network restrictions in place |
 | Firewall verification | Init verifies a blocked site (`example.com`) is unreachable and an allowed site (`api.github.com`) works as root; also verifies the claude user can reach allowed sites via pre-resolved `/etc/hosts` entries |
 | **Cloud metadata endpoints blocked** | `169.254.169.254/32` and `169.254.0.0/16` dropped — prevents credential leakage on cloud VMs (AWS/GCP/Azure instance metadata) |
-| **Host subnet allowed** | Docker gateway subnet (e.g. `192.168.1.0/24`) is reachable — needed for Docker gateway and local MCP services; on shared networks this permits LAN-wide access |
+| **Host subnet allowed** | Docker gateway subnet (e.g. `192.168.1.0/24`) is reachable — needed for Docker gateway and local MCP services; on shared networks this permits LAN-wide access. SSH (22) and Docker API (2375/2376) are blocked to the host subnet. |
 
 **Removed domains** (documented in `config/firewall-allowlist.conf` comments):
 - `sentry.io` — accepts arbitrary POST data (exfiltration channel)
@@ -72,7 +72,7 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
   - **Specific diff/merge keys:** `diff.<driver>.textconv`, `diff.<driver>.command`, `merge.<driver>.driver`
   - **Complex patterns:** `includeIf.*.path` (conditional includes)
 - **`git -c` and `git --config-env` with blocked keys rejected** — detects both separated (`-c key=value`) and concatenated (`-ckey=value`) forms to prevent flag-level config override
-- **Dangerous git environment variables cleared** on every invocation: `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_SYSTEM`, `GIT_PROXY_COMMAND`, `GIT_PAGER`, `GIT_SEQUENCE_EDITOR`, `VISUAL`, `EDITOR`
+- **Dangerous git environment variables cleared** on every invocation: `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_SYSTEM`, `GIT_PROXY_COMMAND`, `GIT_PAGER`, `GIT_SEQUENCE_EDITOR`, `VISUAL`, `EDITOR`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `PAGER`, `LESSOPEN`, `LESSCLOSE`
 - Command lines >=64KB rejected (prevents bypassing validation via truncation)
 - **Argument count overflow blocked** — if args exceed the 256-entry parsing buffer, execution is blocked (prevents pushing blocked keys past the validation boundary)
 - Forces `GIT_CONFIG_COUNT=4` environment overrides on every invocation:
@@ -162,7 +162,7 @@ After the container exits, `run-claude.sh` performs a workspace audit on the hos
 1. **`.git/config` tamper detection** — compares SHA-256 hash against the entrypoint's post-sanitization baseline (immutable root-owned file, prevents tampering). If modified during the session, **atomic restore via mktemp+mv** (replaces any symlink at the target path, preventing arbitrary host file overwrite), then auto-restores from pre-session backup and re-applies sanitization (strips all git-guard blocked keys/sections).
 2. **Interactive hook review** — for each new or modified non-`.sample` file in `.git/hooks/`, shows a content preview (first 15 lines, ANSI-sanitized) and prompts the user to keep or remove it (default: remove). Uses SHA-256 baseline comparison to avoid false positives on pre-existing unchanged hooks.
 3. **Dangerous config key scan** — checks `.git/config` for **all git-guard blocked keys** (exact keys, prefix-based sections like `url.*`, `http.*`, `remote.*`, `credential.*`, `filter.*`, `alias.*`, `diff.*`, `merge.*`, `includeIf.*`) as a final safety net.
-4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox or inject persistent prompts: `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, `package.json`, `.npmrc`, `.eslintrc.js`, `jest.config.js`, `tsconfig.json`, `setup.py`, `pyproject.toml`, `.pre-commit-config.yaml`, `docker-compose.yml`, and others (30+ patterns). Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
+4. **Suspect file warnings** — detects workspace files **created or modified during the session** that can execute code outside the sandbox or inject persistent prompts: `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, `package.json`, `.npmrc`, `.eslintrc.js`, `jest.config.js`, `tsconfig.json`, `setup.py`, `pyproject.toml`, `.pre-commit-config.yaml`, `docker-compose.yml`, and others (50+ patterns). Uses pre/post session SHA-256 comparison — pre-existing unchanged files produce no warning. Output is **sanitized for ANSI escape sequences**.
 
 ## Known Limitations
 
