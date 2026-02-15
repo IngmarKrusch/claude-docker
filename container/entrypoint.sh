@@ -118,6 +118,15 @@ sync_back_on_exit() {
     if [ -n "${CHILD_PID:-}" ]; then
         wait "$CHILD_PID" 2>/dev/null || true
     fi
+    # R15 fix: Reclaim file ownership for sync-back.
+    # The blanket chown at init transfers all files to claude for the session.
+    # This EXIT trap runs as root, but root lacks CAP_DAC_OVERRIDE (docker
+    # --cap-drop=ALL). Without it, root cannot read claude-owned files with
+    # restrictive permissions (e.g. mode 600 from mktemp). Root retains
+    # CAP_CHOWN, allowing ownership reclamation. GNU chown -R processes
+    # directories in pre-order (chown before enter), so even mode-700 dirs
+    # become accessible after the chown.
+    chown -R root: "$CLAUDE_DIR" 2>/dev/null || true
     local SYNC_DIR="/home/claude/.claude-sync"
     if [ -d "$SYNC_DIR" ]; then
         local STAGING="$SYNC_DIR/data"
@@ -143,6 +152,7 @@ sync_back_on_exit() {
             --exclude='.gitconfig' \
             --exclude='entrypoint.log' \
             --exclude='.history-baseline-lines' \
+            --exclude='history.jsonl' \
             "$CLAUDE_DIR/" "$STAGING/" 2>/dev/null || true
 
         # M12 Round 10 fix: Relocate -workspace project data to host-encoded
@@ -157,23 +167,30 @@ sync_back_on_exit() {
             fi
         fi
 
-        # Rewrite /workspace → host project path in history.jsonl so that
-        # container sessions are discoverable by host-native Claude Code
-        # (which filters --continue/--resume by the real host CWD).
-        # R12-H01 fix: Use jq for JSON rewriting (see inbound comment for rationale)
-        # R14 fix: Use jq -R -r with try/catch for per-line resilience
-        if [ -n "${PROJECT_PATH:-}" ] && [ -f "$STAGING/history.jsonl" ]; then
-            _tmp=$(mktemp "$STAGING/history.jsonl.XXXXXX")
-            jq -R -r --arg old "/workspace" --arg new "$PROJECT_PATH" '
-              . as $raw | try (fromjson | if .project == $old then .project = $new else . end | tojson) catch $raw
-            ' "$STAGING/history.jsonl" > "$_tmp" \
-                && mv "$_tmp" "$STAGING/history.jsonl" \
-                || rm -f "$_tmp"
+        # R15 diagnostic: log transcript file counts for debugging sync issues
+        _pre_transcripts=$(find "$CLAUDE_DIR/projects" -name "*.jsonl" -type f 2>/dev/null | wc -l)
+        _post_transcripts=$(find "$STAGING/projects" -name "*.jsonl" -type f 2>/dev/null | wc -l)
+        echo "[sandbox] Sync-back: $_pre_transcripts transcript(s) in container, $_post_transcripts staged" >> "$LOGFILE" 2>/dev/null || true
 
-            # R14 diagnostic: Warn if outbound rewrite left /workspace entries
-            _ws_remaining=$(grep -c '"project":"/workspace"' "$STAGING/history.jsonl" 2>/dev/null || echo 0)
-            if [ "$_ws_remaining" -gt 0 ]; then
-                echo "[sandbox] WARNING: $_ws_remaining history entries still have project=/workspace after outbound rewrite" >> "$LOGFILE" 2>/dev/null || true
+        # R15 fix: Append-only history sync. Extract only entries added during
+        # this session and outbound-rewrite them. Avoids replacing the host's
+        # history.jsonl which a concurrent host-native session may be writing to.
+        if [ -n "${PROJECT_PATH:-}" ] && [ -f "$CLAUDE_DIR/history.jsonl" ]; then
+            local BASELINE=0
+            if [ -f "$CLAUDE_DIR/.history-baseline-lines" ]; then
+                BASELINE=$(cat "$CLAUDE_DIR/.history-baseline-lines" 2>/dev/null || echo 0)
+            fi
+            local TOTAL
+            TOTAL=$(wc -l < "$CLAUDE_DIR/history.jsonl" 2>/dev/null || echo 0)
+            local NEW_COUNT=$((TOTAL - BASELINE))
+            if [ "$NEW_COUNT" -gt 0 ]; then
+                tail -n "$NEW_COUNT" "$CLAUDE_DIR/history.jsonl" \
+                    | jq -R -r --arg old "/workspace" --arg new "$PROJECT_PATH" '
+                      . as $raw | try (fromjson | if .project == $old then .project = $new else . end | tojson) catch $raw
+                    ' > "$SYNC_DIR/history-append.jsonl" 2>/dev/null || true
+                echo "[sandbox] History: $NEW_COUNT new entry/entries staged for append" >> "$LOGFILE" 2>/dev/null || true
+            else
+                echo "[sandbox] History: no new entries" >> "$LOGFILE" 2>/dev/null || true
             fi
         fi
     fi

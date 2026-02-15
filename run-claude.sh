@@ -541,8 +541,33 @@ if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
         --exclude='.gitconfig' \
         --exclude='entrypoint.log' \
         --exclude='.history-baseline-lines' \
+        --exclude='history.jsonl' \
         "$HOME/.claude/.sync-back/data/" "$HOME/.claude/"
     echo "[sandbox] Sync complete"
+
+    # R15 fix: Append-only history sync — cat new entries, extract session ID
+    # from the append file directly (not from host history.jsonl which the
+    # concurrent host-native session may overwrite between append and read).
+    HISTORY_APPEND="$HOME/.claude/.sync-back/history-append.jsonl"
+    CONTAINER_SESSION_ID=""
+    if [ -f "$HISTORY_APPEND" ] && [ -s "$HISTORY_APPEND" ]; then
+        APPEND_COUNT=$(wc -l < "$HISTORY_APPEND")
+        cat "$HISTORY_APPEND" >> "$HOME/.claude/history.jsonl"
+        echo "[sandbox] Appended $APPEND_COUNT history entries"
+        CONTAINER_SESSION_ID=$(python3 -c "
+import json, sys
+project = sys.argv[1]
+last = ''
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        if d.get('project') == project:
+            last = d.get('sessionId', '')
+    except:
+        pass
+print(last)
+" "$PROJECT_DIR" < "$HISTORY_APPEND" 2>/dev/null || true)
+    fi
 fi
 # Clean up sync staging directory
 rm -rf "$HOME/.claude/.sync-back" 2>/dev/null || true
@@ -683,9 +708,12 @@ if [ -n "$AUDIT_WARNINGS" ]; then
     echo "[sandbox] Use 'git diff' to inspect changes."
 fi
 
-# R14 fix: Filter history.jsonl by PROJECT_DIR — tail -1 returns the most recent
-# entry across ALL projects, which is wrong when host-native sessions run concurrently.
-SESSION_ID=$(python3 -c "
+# R15 fix: Use container session ID if available (from staging, race-free),
+# otherwise fall back to scanning the host's history.jsonl
+if [ -n "${CONTAINER_SESSION_ID:-}" ]; then
+    SESSION_ID="$CONTAINER_SESSION_ID"
+else
+    SESSION_ID=$(python3 -c "
 import json, sys
 project = sys.argv[1]
 last = ''
@@ -698,6 +726,7 @@ for line in sys.stdin:
         pass
 print(last)
 " "$PROJECT_DIR" < "$HOME/.claude/history.jsonl" 2>/dev/null || true)
+fi
 
 if [ -n "$LAUNCH_LOG" ] || [ -n "$SESSION_ID" ]; then
     echo ""
