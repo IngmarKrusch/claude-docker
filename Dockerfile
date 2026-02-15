@@ -22,7 +22,7 @@ ARG GROUP_ID=20
 # System dependencies (firewall + dev tools) — gcc/libc6-dev no longer needed
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl gosu zsh fzf ripgrep jq aggregate ca-certificates rsync \
+    git curl gosu zsh fzf ripgrep jq aggregate ca-certificates rsync ncurses-term \
     iptables ipset dnsutils iproute2 libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 

@@ -424,6 +424,18 @@ chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/nul
 chown root:root "$GITCONFIG" 2>/dev/null || true
 chmod 444 "$GITCONFIG" 2>/dev/null || true
 
+# Validate TERM has a matching terminfo entry. Host values like xterm-kitty
+# may lack entries even with ncurses-term installed. Try stripping the xterm-
+# prefix (e.g. xterm-kitty -> kitty) before falling back to xterm-256color.
+if [ -n "${TERM:-}" ] && ! infocmp "$TERM" >/dev/null 2>&1; then
+    _base="${TERM#xterm-}"
+    if [ "$_base" != "$TERM" ] && infocmp "$_base" >/dev/null 2>&1; then
+        export TERM="$_base"
+    else
+        export TERM="xterm-256color"
+    fi
+fi
+
 # Set user environment variables that 'USER claude' in Dockerfile would have
 # provided. gosu only changes uid/gid, it does not set these.
 export USER=claude

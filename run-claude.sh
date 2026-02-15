@@ -506,6 +506,9 @@ docker run --rm -it \
     -v "$GIT_CONFIG_HASH_FILE":/run/git-config-hash \
     -e ENTRYPOINT_LOG=/run/entrypoint.log \
     -e PROJECT_PATH="$PROJECT_DIR" \
+    -e "TERM=${TERM:-xterm-256color}" \
+    -e "TERM_PROGRAM=${TERM_PROGRAM:-}" \
+    -e "COLORTERM=${COLORTERM:-}" \
     "${ADD_HOST_FLAGS[@]}" \
     "$IMAGE_NAME" \
     claude "${CLAUDE_ARGS[@]}"
