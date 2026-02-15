@@ -31,6 +31,7 @@ if [ -n "$DOCKER_DNS_RULES" ]; then
     # so unquoted $_rule wouldn't be word-split into separate iptables arguments).
     while IFS= read -r _rule; do
         [ -z "$_rule" ] && continue
+        # shellcheck disable=SC2086  # $_rule must word-split into separate iptables arguments
         (IFS=$' \t\n'; iptables -t nat $_rule)
     done <<< "$DOCKER_DNS_RULES"
 else
@@ -146,5 +147,6 @@ fi
 # Verify firewall rules work for the claude user (not just root, which retains
 # DNS access). Claude user resolves hostnames via /etc/hosts (pre-resolved on host).
 if ! gosu claude curl --connect-timeout 10 https://api.github.com/zen >/dev/null 2>&1; then
-    _log "WARNING: Claude user cannot reach GitHub API - check /etc/hosts entries (--add-host)"
+    _log "FATAL: Claude user cannot reach GitHub API - check /etc/hosts entries (--add-host)"
+    exit 1
 fi

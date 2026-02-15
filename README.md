@@ -27,12 +27,12 @@ orb -m hardening -u root sh -c '
   sysctl -w kernel.yama.ptrace_scope=2
 
   # Disable unprivileged userfaultfd (defense-in-depth; seccomp already blocks it)
-  sysctl -w vm.unprivileged_userfaultfd=1
+  sysctl -w vm.unprivileged_userfaultfd=0
 
   # Make persistent across VM restarts
   cat > /etc/sysctl.d/99-claude-sandbox.conf << EOF
 kernel.yama.ptrace_scope = 2
-vm.unprivileged_userfaultfd = 1
+vm.unprivileged_userfaultfd = 0
 EOF
 '
 ```
@@ -83,7 +83,6 @@ These are consumed by `run-claude.sh` itself:
 - `--fresh-creds` — Overwrite credentials with current keychain values
 - `--isolate-claude-data` — Use isolated Docker volume instead of read-only host mount + tmpfs (required for Docker Desktop)
 - `--no-sync-back` — Disable sync-back of session data to host on clean exit
-- `--with-gvisor` — Use gVisor (runsc) runtime if available (note: firewall doesn't work with gVisor)
 - `--allow-git-push` — Enable `git push` from inside the container (blocked by default for security)
 - `--disallow-broad-gh-token` — Reject broad-scope GitHub tokens (`ghp_*`/`gho_*`). Only fine-grained PATs (`github_pat_*`) accepted.
 - `--reload-firewall` — Reload `config/firewall-allowlist.conf` in all running containers
@@ -208,7 +207,7 @@ If auto-refresh fails or you see auth errors mid-session:
 
 ### "FATAL: Firewall initialization failed"
 
-The iptables firewall requires NET_ADMIN capability. Firewall init failure is now **fatal** — the container will not start without network restrictions in place. If you see this error, check that `--cap-add=NET_ADMIN` is present in the docker run command. With gVisor runtime, the firewall does not work due to gVisor's virtualized network stack — this is expected (use default runc runtime instead).
+The iptables firewall requires NET_ADMIN capability. Firewall init failure is now **fatal** — the container will not start without network restrictions in place. If you see this error, check that `--cap-add=NET_ADMIN` is present in the docker run command.
 
 ### Permission denied on project files
 
@@ -224,14 +223,6 @@ If different, rebuild:
 docker rmi claude-sandbox
 ./run-claude.sh ~/Projects/whatever  # auto-rebuilds with your UID
 ```
-
-### Container won't start with gVisor
-
-```bash
-docker run --rm --runtime=runsc hello-world
-```
-
-If gVisor is broken, `run-claude.sh` falls back to runc automatically. gVisor is only used when explicitly requested via `--with-gvisor`; the default runtime is runc.
 
 ### Bash commands fail with Docker Desktop
 
@@ -275,4 +266,4 @@ Removes conversation history, settings, and cached data. Credentials are re-inje
 
 - [Security Model](docs/SECURITY.md) — threat model, all hardening layers, known limitations, what we tried and removed, audit methodology
 - [Architecture & Development](docs/ARCHITECTURE.md) — internals, entrypoint lifecycle, file reference, contributor guide
-- [Security Audit Reports](docs/audit/) — findings and fixes from 11+ audit rounds
+- [Security Audit Reports](docs/audit/) — findings and fixes from 16+ audit rounds

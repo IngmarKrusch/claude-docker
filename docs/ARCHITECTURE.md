@@ -38,6 +38,7 @@ For setup and usage, see the [README](../README.md). For security model and hard
 │  │  │   /tmp             ← tmpfs (noexec,512m) │  │  │
 │  │  │   ~/.npm           ← tmpfs (noexec,256m) │  │  │
 │  │  │   ~/.config        ← tmpfs (64m)         │  │  │
+│  │  │   /run             ← tmpfs (nosuid,noexec,1m) │  │  │
 │  │  │   /dev/shm         ← 64m                 │  │  │
 │  │  │                                          │  │  │
 │  │  │  Credential flow:                        │  │  │
@@ -52,7 +53,7 @@ For setup and usage, see the [README](../README.md). For security model and hard
 
 ## Entrypoint Lifecycle
 
-1. **Mount isolation** — copy session data from host-side staging dir (`/mnt/.claude-host`, contains only needed files) to writable tmpfs (`~/.claude`). Uses `cp -P` (no symlink dereferencing). Project data loaded using host-side `PROJECT_PATH` encoding for per-project isolation.
+1. **Mount isolation** — copy session data from host-side staging dir (`/mnt/.claude-host`, contains only needed files) to writable tmpfs (`~/.claude`). Uses `cp -L` (dereference symlinks — prevents symlink-following attacks). Project data loaded using host-side `PROJECT_PATH` encoding for per-project isolation.
 2. **Push flag** — create `/run/sandbox-flags/allow-git-push` if `--allow-git-push` was passed (root-owned, immutable after privilege drop)
 3. **Firewall** — initialize iptables allowlist, IPv6 disable, port restrictions (443/80), DNS blocked for claude user (pre-resolved via `/etc/hosts`), SSH blocking, connectivity verification. **Firewall init failure is fatal** — container exits if network restrictions cannot be established.
 4. **Credentials** — write OAuth tokens to file, schedule background scrub (best-effort urandom overwrite + delete after 1s — may persist if CC re-creates the file)
@@ -67,7 +68,7 @@ For setup and usage, see the [README](../README.md). For security model and hard
 2. **`.git/config` tamper detection** — compare SHA-256 hash against immutable post-sanitization baseline; **check for symlink attacks** before restore (prevents arbitrary host file overwrite); auto-restore from pre-session backup and re-apply full sanitization if modified
 3. **Hook detection** — warn about new non-`.sample` files in `.git/hooks/`. **ANSI escape sequences sanitized** to prevent terminal injection.
 4. **Dangerous config scan** — check `.git/config` for **all git-guard blocked keys** (comprehensive coverage of exact keys and prefix-based sections)
-5. **Suspect file warnings** — detect `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows` that were **created or modified** during the session (pre/post SHA-256 comparison). **ANSI escape sequences sanitized**.
+5. **Suspect file warnings** — detect `CLAUDE.md` (prompt injection persistence), `Justfile`, `Taskfile.yml`, `.envrc`, `.vscode/settings.json`, `.vscode/tasks.json`, `Makefile`, `.gitattributes`, `.gitmodules`, `.github/workflows`, and others (35 patterns total) that were **created or modified** during the session (pre/post SHA-256 comparison). **ANSI escape sequences sanitized**.
 
 ## Persistent State
 
@@ -100,8 +101,8 @@ Expired credentials are automatically detected on container start and replaced w
 **docs/** — documentation:
 - **docs/SECURITY.md** — Security model, threat model, hardening layers, known limitations, audit methodology
 - **docs/ARCHITECTURE.md** — This file: architecture overview, entrypoint lifecycle, file reference, development guide
-- **docs/SECURITY-AUDIT-REPORT.md** — Initial comprehensive security audit report
-- **docs/ROUND-10-IMPLEMENTATION.md** — Round 10 implementation notes
+- **docs/audit/SECURITY-AUDIT-REPORT.md** — Initial comprehensive security audit report
+- **docs/audit/ROUND-10-IMPLEMENTATION.md** — Round 10 implementation notes
 - **docs/audit/FINDINGS.md** — Audit findings
 - **docs/audit/AUDIT-ROUND-10.md** — Round 10 audit details
 

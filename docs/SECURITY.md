@@ -47,6 +47,8 @@ Outbound traffic is restricted to an allowlist of resolved IPs via iptables + ip
 | `DISABLE_ERROR_REPORTING=1` | Prevents Claude Code from attempting error reports even if allowlist is accidentally widened |
 | **Firewall init failure is fatal** | Container exits if firewall initialization fails — cannot start without network restrictions in place |
 | Firewall verification | Init verifies a blocked site (`example.com`) is unreachable and an allowed site (`api.github.com`) works as root; also verifies the claude user can reach allowed sites via pre-resolved `/etc/hosts` entries |
+| **Cloud metadata endpoints blocked** | `169.254.169.254/32` and `169.254.0.0/16` dropped — prevents credential leakage on cloud VMs (AWS/GCP/Azure instance metadata) |
+| **Host subnet allowed** | Docker gateway subnet (e.g. `192.168.1.0/24`) is reachable — needed for Docker gateway and local MCP services; on shared networks this permits LAN-wide access |
 
 **Removed domains** (documented in `config/firewall-allowlist.conf` comments):
 - `sentry.io` — accepts arbitrary POST data (exfiltration channel)
@@ -64,10 +66,11 @@ Two-layer enforcement prevents the AI from using git as an exfiltration or persi
 - `git submodule add` blocked (prevents pulling arbitrary repos)
 - **`git config` with dangerous keys blocked** (comprehensive list covering all documented git escape vectors):
   - **Exact keys:** `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`, `credential.helper`, `include.path`, `core.gitProxy`, `core.askPass`
-  - **Prefix-based blocking:** `url.*` (URL rewriting), `http.*` (proxy/SSL bypass), `remote.*` (remote manipulation), `credential.*` (all credential helper forms), `filter.*`, `alias.*`, `diff.*`, `merge.*`
+  - **Prefix-based blocking:** `url.*` (URL rewriting), `http.*` (proxy/SSL bypass), `remote.*` (remote manipulation), `credential.*` (all credential helper forms), `filter.*`, `alias.*`
+  - **Specific diff/merge keys:** `diff.<driver>.textconv`, `diff.<driver>.command`, `merge.<driver>.driver`
   - **Complex patterns:** `includeIf.*.path` (conditional includes)
 - **`git -c` and `git --config-env` with blocked keys rejected** — detects both separated (`-c key=value`) and concatenated (`-ckey=value`) forms to prevent flag-level config override
-- **Dangerous git environment variables cleared** on every invocation: `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_SYSTEM`, `GIT_PROXY_COMMAND`
+- **Dangerous git environment variables cleared** on every invocation: `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_SYSTEM`, `GIT_PROXY_COMMAND`, `GIT_PAGER`, `GIT_SEQUENCE_EDITOR`, `VISUAL`, `EDITOR`
 - Command lines >=64KB rejected (prevents bypassing validation via truncation)
 - **Argument count overflow blocked** — if args exceed the 256-entry parsing buffer, execution is blocked (prevents pushing blocked keys past the validation boundary)
 - Forces `GIT_CONFIG_COUNT=4` environment overrides on every invocation:
@@ -163,7 +166,7 @@ After the container exits, `run-claude.sh` performs a workspace audit on the hos
 | Severity | Issue | Mitigation |
 |----------|-------|-----------|
 | **HIGH** | **GitHub token extractable** — AI runs as same UID as git; can `net.connect` to credential cache socket | Use [fine-grained PATs](https://github.com/settings/personal-access-tokens/new) scoped to workspace repo. `--disallow-broad-gh-token` rejects classic/OAuth tokens. |
-| **HIGH** | **API endpoint exfiltration** (accepted risk) — `api.anthropic.com` accepts 200K tokens/request (~800KB), `api.github.com` accepts gists/issues/repos, `registry.npmjs.org` accepts `npm publish` | Inherent to Claude Code operation — cannot function without API access. Mitigations: fine-grained GitHub PATs, session transcript review, `git diff` after sessions. |
+| **HIGH** | **API endpoint exfiltration** (accepted risk) — `api.anthropic.com` accepts 200K tokens/request (~800KB), `api.github.com` accepts gists/issues/repos, `registry.npmjs.org` accepts `npm publish`, `api.todoist.com` accepts task creation/updates | Inherent to Claude Code operation — cannot function without API access. Mitigations: fine-grained GitHub PATs, session transcript review, `git diff` after sessions. |
 | **MEDIUM** | **Workspace write-back** — `/workspace` is writable; session could plant `.envrc`, hooks, CI configs that execute on host | Post-exit audit warns about dangerous files. Review `git diff` after sessions. |
 | **LOW** | **History readable** — container receives host `history.jsonl` for `--continue` (current session only; other projects' data not exposed via host-side staging) | HTTPS exfiltration to allowed domains remains possible (accepted risk above). |
 | **LOW** | **`.config.json` PII exposure** (accepted risk) — `.config.json` is copied unfiltered into the container, exposing email, account UUIDs, project paths, and usage metrics to the AI agent | Incremental risk — the AI already has access to workspace code. Firewall limits exfiltration targets. `.config.json` is excluded from sync-back to prevent poisoning. |
@@ -203,12 +206,12 @@ orb -m hardening -u root sh -c '
   sysctl -w kernel.yama.ptrace_scope=2
 
   # Disable unprivileged userfaultfd (defense-in-depth; seccomp already blocks it)
-  sysctl -w vm.unprivileged_userfaultfd=1
+  sysctl -w vm.unprivileged_userfaultfd=0
 
   # Make persistent across VM restarts
   cat > /etc/sysctl.d/99-claude-sandbox.conf << EOF
 kernel.yama.ptrace_scope = 2
-vm.unprivileged_userfaultfd = 1
+vm.unprivileged_userfaultfd = 0
 EOF
 '
 ```
@@ -229,4 +232,4 @@ How we audit this project:
 6. **Test post-exit audit detection** (plant `.envrc`, modify `.git/config`, add hooks)
 7. **Document findings** with severity, proof-of-concept, and remediation
 
-Reference: [docs/audit/](audit/) for methodology and findings from 11+ rounds. Reference: [SECURITY-AUDIT-REPORT.md](SECURITY-AUDIT-REPORT.md) for the initial comprehensive audit.
+Reference: [docs/audit/](audit/) for methodology and findings from 16+ rounds. Reference: [SECURITY-AUDIT-REPORT.md](audit/SECURITY-AUDIT-REPORT.md) for the initial comprehensive audit.

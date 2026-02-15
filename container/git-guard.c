@@ -127,6 +127,10 @@ static void git_guard_init(void) {
     unsetenv("GIT_TEMPLATE_DIR");
     unsetenv("GIT_CONFIG_SYSTEM");
     unsetenv("GIT_PROXY_COMMAND");
+    unsetenv("GIT_PAGER");
+    unsetenv("GIT_SEQUENCE_EDITOR");
+    unsetenv("VISUAL");
+    unsetenv("EDITOR");
 
     /* Force security-critical git config via environment.
      * GIT_CONFIG_COUNT overrides local/global gitconfig, preventing

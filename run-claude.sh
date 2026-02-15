@@ -43,10 +43,6 @@ Options:
                           exits cleanly. settings.json, .config.json, and
                           user-level CLAUDE.md are NEVER synced back
                           regardless of this flag.
-  --with-gvisor           Use gVisor (runsc) runtime if available. By default
-                          the standard runc runtime is used, which is best for
-                          OrbStack. Note: the iptables firewall does not work
-                          with gVisor's virtualized network stack.
   --allow-git-push        Enable git push from inside the container (blocked
                           by default for security). Consider using a fine-grained
                           GitHub PAT scoped to the target repo.
@@ -95,7 +91,7 @@ Argument routing:
   to claude as CLAUDE_ARGS.
 
   Script flags:  --rebuild, --fresh-creds, --isolate-claude-data, --no-sync-back,
-                 --with-gvisor, --reload-firewall, --allow-git-push,
+                 --reload-firewall, --allow-git-push,
                  --disallow-broad-gh-token
   Claude flags:  --continue, --resume, -p, --allowedTools, --model, etc.
 
@@ -118,7 +114,6 @@ REBUILD=false
 FRESH_CREDS=false
 ISOLATE_DATA=false
 SYNC_BACK=true
-WITH_GVISOR=false
 RELOAD_FIREWALL=false
 ALLOW_GIT_PUSH=false
 DISALLOW_BROAD_TOKEN=false
@@ -130,7 +125,6 @@ for arg in "$@"; do
         --fresh-creds) FRESH_CREDS=true ;;
         --isolate-claude-data) ISOLATE_DATA=true ;;
         --no-sync-back) SYNC_BACK=false ;;
-        --with-gvisor) WITH_GVISOR=true ;;
         --reload-firewall) RELOAD_FIREWALL=true ;;
         --allow-git-push) ALLOW_GIT_PUSH=true ;;
         --disallow-broad-gh-token) DISALLOW_BROAD_TOKEN=true ;;
@@ -271,36 +265,18 @@ if [ "$REBUILD" = true ]; then
     # CACHE_BUST only changes when Claude Code version is outdated.
     # shellcheck disable=SC2086
     docker build \
-        --build-arg USER_ID=$(id -u) \
-        --build-arg GROUP_ID=$(id -g) \
+        --build-arg USER_ID="$(id -u)" \
+        --build-arg GROUP_ID="$(id -g)" \
         $CACHE_BUST_FLAG \
         -t "$IMAGE_NAME" \
         "$SCRIPT_DIR"
 elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     log "[sandbox] Building sandbox image..."
     docker build \
-        --build-arg USER_ID=$(id -u) \
-        --build-arg GROUP_ID=$(id -g) \
+        --build-arg USER_ID="$(id -u)" \
+        --build-arg GROUP_ID="$(id -g)" \
         -t "$IMAGE_NAME" \
         "$SCRIPT_DIR"
-fi
-
-# Detect runtime: use runc by default, gVisor only with --with-gvisor
-RUNTIME_FLAG=()
-if [ "$WITH_GVISOR" = true ]; then
-    if docker info 2>/dev/null | grep -q runsc; then
-        RUNTIME_FLAG=(--runtime=runsc)
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════════╗"
-        echo "║  WARNING: gVisor runtime disables the iptables firewall.    ║"
-        echo "║  The container will have UNRESTRICTED network access.       ║"
-        echo "║  All network-layer security controls are bypassed.          ║"
-        echo "╚══════════════════════════════════════════════════════════════╝"
-        echo ""
-        log "[sandbox] Using gVisor runtime (firewall inactive)"
-    else
-        log "[sandbox] Warning: --with-gvisor requested but runsc not available, using runc"
-    fi
 fi
 
 # Pass credentials via --env-file to avoid exposure in 'ps aux' output (M1 fix).
@@ -351,7 +327,7 @@ else
     done
 
     # Current project data only (matches entrypoint.sh lines 42-60)
-    _HOST_ENCODED=$(echo "$PROJECT_DIR" | sed 's|/|-|g')
+    _HOST_ENCODED=${PROJECT_DIR//\//-}
     if [ -d "$HOME/.claude/projects/$_HOST_ENCODED" ]; then
         mkdir -p "$CLAUDE_STAGING/projects/$_HOST_ENCODED"
         cp -rL "$HOME/.claude/projects/$_HOST_ENCODED/." \
@@ -371,6 +347,7 @@ else
         [ -d "$HOME/.claude/$d" ] && cp -rL "$HOME/.claude/$d" "$CLAUDE_STAGING/" 2>/dev/null || true
     done
 
+    # shellcheck disable=SC2054  # commas are tmpfs mount options, not array separators
     CLAUDE_MOUNT_FLAGS=(-v "$CLAUDE_STAGING:/mnt/.claude-host:ro" --tmpfs /home/claude/.claude:rw,nosuid,size=512m)
     log "[sandbox] Staged ~/.claude data (host-side, read-only mount)"
 
@@ -406,7 +383,7 @@ if [ -f "$PROJECT_DIR/.git/config" ]; then
             PRE_GIT_CONFIG_KEYS+="$key"$'\n'
         fi
     done
-    for section in alias includeIf filter url http remote credential diff merge; do
+    for section in alias include includeIf filter url http remote credential diff merge; do
         if git config -f "$PROJECT_DIR/.git/config" --get-regexp "^${section}\." >/dev/null 2>&1; then
             PRE_GIT_CONFIG_KEYS+="${section}.*"$'\n'
         fi
@@ -433,11 +410,9 @@ done
 ENTRYPOINT_LOG=$(mktemp)
 
 # L1 fix: clean up all tempfiles on signal/early-exit
+# shellcheck disable=SC2329  # invoked via trap
 _cleanup_temps() { rm -f "$GIT_CONFIG_BACKUP" "$GIT_CONFIG_HASH_FILE" "$ENTRYPOINT_LOG" "$ENVFILE" 2>/dev/null; rm -rf "${CLAUDE_STAGING:-}" 2>/dev/null; }
 trap _cleanup_temps EXIT
-
-# Delete env file shortly after docker reads it (minimizes on-disk exposure)
-(sleep 2 && rm -f "$ENVFILE") &
 
 # M4 Round 10 fix: Only mount ~/.gitconfig if it exists
 GITCONFIG_MOUNT=()
@@ -471,10 +446,12 @@ if [ -f "$ALLOWLIST_CONF" ]; then
     done < "$ALLOWLIST_CONF"
 fi
 
+# Delete env file shortly after docker reads it (minimizes on-disk exposure)
+(sleep 2 && rm -f "$ENVFILE") &
+
 set +e
 docker run --rm -it \
     --init \
-    "${RUNTIME_FLAG[@]}" \
     --cap-drop=ALL \
     --cap-add=CHOWN \
     --cap-add=SETUID \
@@ -665,7 +642,7 @@ if [ -f "$PROJECT_DIR/.git/config" ]; then
         fi
     done
     # Section/prefix-based keys (H3 Round 10 additions)
-    for section in alias includeIf filter url http remote credential diff merge; do
+    for section in alias include includeIf filter url http remote credential diff merge; do
         # Skip if section existed before the session
         printf '%s' "$PRE_GIT_CONFIG_KEYS" | grep -qxF "${section}.*" && continue
         if git config -f "$PROJECT_DIR/.git/config" --get-regexp "^${section}\." >/dev/null 2>&1; then

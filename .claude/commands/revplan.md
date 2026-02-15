@@ -1,1 +1,4 @@
-Critically review the plan. How confident are you it is correct, does not introduce regression, does not try to "fix" accepted risks, and does indeed fix root causes? Consult README.md, docs/SECURITY.md, and docs/ARCHITECTURE.md for perspective.
+Critically review the plan we just created.
+How confident are you it is correct, the issues are real and it does indeed fix root causes?
+Are you confident that the plan does not introduce regression, does not try to "fix" accepted risks?
+Consult README.md, docs/SECURITY.md, and docs/ARCHITECTURE.md for perspective.

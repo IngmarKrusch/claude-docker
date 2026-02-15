@@ -49,6 +49,7 @@ if [ -d "$HOST_CLAUDE" ]; then
     # JSON lines and passes through malformed lines unchanged.
     if [ -n "${PROJECT_PATH:-}" ] && [ -f "$CLAUDE_DIR/history.jsonl" ]; then
         _tmp=$(mktemp "$CLAUDE_DIR/history.jsonl.XXXXXX")
+        # shellcheck disable=SC2015  # || rm is cleanup, not an else branch
         jq -R -r --arg old "$PROJECT_PATH" --arg new "/workspace" '
           . as $raw | try (fromjson | if .project == $old then .project = $new else . end | tojson) catch $raw
         ' "$CLAUDE_DIR/history.jsonl" > "$_tmp" \
@@ -62,13 +63,13 @@ if [ -d "$HOST_CLAUDE" ]; then
     # 5. Current project data ONLY: memory + session transcripts
     #    Encode workspace path the same way Claude Code does (/ → -)
     WORKSPACE_PATH=$(readlink -f /workspace)
-    ENCODED_PATH=$(echo "$WORKSPACE_PATH" | sed 's|/|-|g')
+    ENCODED_PATH=${WORKSPACE_PATH//\//-}
     # M12 Round 10 fix: Use host's real project path for data isolation.
     # Inside the container, /workspace always encodes to -workspace, causing
     # all projects to share the same data directory. PROJECT_PATH carries the
     # host-side path so each project gets its own encoded directory.
     if [ -n "${PROJECT_PATH:-}" ]; then
-        HOST_ENCODED=$(echo "$PROJECT_PATH" | sed 's|/|-|g')
+        HOST_ENCODED=${PROJECT_PATH//\//-}
         if [ -d "$HOST_CLAUDE/projects/$HOST_ENCODED" ]; then
             mkdir -p "$CLAUDE_DIR/projects/$ENCODED_PATH"
             cp -rL "$HOST_CLAUDE/projects/$HOST_ENCODED/." \
@@ -159,7 +160,7 @@ sync_back_on_exit() {
         # path in staging so it syncs back to the correct project directory
         if [ -n "${PROJECT_PATH:-}" ]; then
             local HOST_ENCODED
-            HOST_ENCODED=$(echo "$PROJECT_PATH" | sed 's|/|-|g')
+            HOST_ENCODED=${PROJECT_PATH//\//-}
             if [ "$HOST_ENCODED" != "-workspace" ] && [ -d "$STAGING/projects/-workspace" ]; then
                 mkdir -p "$STAGING/projects/$HOST_ENCODED"
                 cp -a "$STAGING/projects/-workspace/." "$STAGING/projects/$HOST_ENCODED/" 2>/dev/null || true

@@ -59,6 +59,10 @@ while IFS= read -r line; do
                     _log "WARNING: Invalid CIDR prefix /$_prefix from GitHub meta: $cidr"
                     continue
                 fi
+                if [ "$_prefix" -lt 8 ] 2>/dev/null; then
+                    _log "WARNING: Suspiciously broad CIDR prefix /$_prefix from GitHub meta: $cidr (minimum /8)"
+                    continue
+                fi
                 /usr/sbin/ipset add "$IPSET_TMP" "$cidr" 2>/dev/null || true
                 ENTRY_COUNT=$((ENTRY_COUNT + 1))
             else
