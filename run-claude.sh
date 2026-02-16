@@ -32,8 +32,8 @@ Options:
                           build-arg). Use after editing the Dockerfile or to
                           pull a new Claude Code version.
   --fresh-creds           Force re-inject credentials from the macOS keychain,
-                          even if unexpired credentials exist in the container.
-                          Useful after running 'claude login' on the host.
+                          even if unexpired credentials exist in the container
+                          volume. Only needed with --isolate-claude-data.
   --isolate-claude-data   Use a named Docker volume ('claude-data') instead of
                           the default read-only host mount + writable tmpfs.
                           Required for Docker Desktop (see below).
@@ -195,7 +195,7 @@ BUFFER_MS=300000  # 5 minutes
 # M10 Round 10 fix: Validate expiresAt is numeric to prevent crash under set -e
 if [[ "$EXPIRES_AT" =~ ^[0-9]+$ ]] && [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT" -le $((NOW_MS + BUFFER_MS)) ]; then
     log "[sandbox] Keychain access token expired, refreshing via host claude..."
-    if timeout 30 claude -p "." --max-turns 1 > /dev/null 2>&1; then
+    if timeout 30 claude -p "." --max-turns 1 > /dev/null; then
         # Re-extract refreshed credentials
         CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
         if [ -z "$CREDS" ]; then
@@ -204,7 +204,28 @@ if [[ "$EXPIRES_AT" =~ ^[0-9]+$ ]] && [ "$EXPIRES_AT" -gt 0 ] && [ "$EXPIRES_AT"
         fi
         log "[sandbox] Credentials refreshed successfully"
     else
-        log "[sandbox] Warning: Auto-refresh failed. If you get auth errors, run: claude login"
+        # Re-extract — the failed attempt may have refreshed the keychain
+        # before exiting non-zero (e.g., token refreshed but API call failed)
+        CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+        if [ -z "$CREDS" ]; then
+            echo "Error: No credentials in keychain after refresh attempt."
+            exit 1
+        fi
+        NEW_EXPIRES=$(python3 -c "
+import json, sys
+creds = json.loads(sys.stdin.read())
+print(creds.get('claudeAiOauth', {}).get('expiresAt', 0))
+" <<< "$CREDS" 2>/dev/null || echo 0)
+        NOW_MS=$(( $(date +%s) * 1000 ))
+        if [[ "$NEW_EXPIRES" =~ ^[0-9]+$ ]] && [ "$NEW_EXPIRES" -gt 0 ] && [ "$NEW_EXPIRES" -le "$NOW_MS" ]; then
+            echo ""
+            echo "ERROR: Credentials are expired and auto-refresh failed."
+            echo "  Run 'claude login' on the host, then restart the container."
+            echo ""
+            exit 1
+        else
+            log "[sandbox] Credentials refreshed (keychain updated despite non-zero exit)"
+        fi
     fi
 fi
 

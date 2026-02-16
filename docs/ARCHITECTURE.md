@@ -80,7 +80,7 @@ By default, the host's `~/.claude/` is mounted **read-only** into the container.
 
 Use `--no-sync-back` to disable all sync-back. Use `--isolate-claude-data` for Docker Desktop compatibility (uses a named Docker volume instead).
 
-Expired credentials are automatically detected on container start and replaced with fresh ones from keychain. Use `--fresh-creds` to force re-injection even when credentials haven't expired.
+Expired credentials are automatically detected on container start. The launcher runs a host-native `claude` prompt to trigger an OAuth refresh, then re-extracts the updated credentials from the keychain. If the refresh fails, the container refuses to start with a clear error. Use `--fresh-creds` with `--isolate-claude-data` to force re-injection into the named volume even when credentials haven't expired.
 
 ## File Reference
 

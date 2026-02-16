@@ -80,7 +80,7 @@ After setup, the container runs with: read-only rootfs, network allowlist with D
 These are consumed by `run-claude.sh` itself:
 
 - `--rebuild` — Rebuild image (runs lint, skips if already up-to-date, uses targeted cache bust)
-- `--fresh-creds` — Overwrite credentials with current keychain values
+- `--fresh-creds` — Force re-inject credentials from keychain (only needed with `--isolate-claude-data`)
 - `--isolate-claude-data` — Use isolated Docker volume instead of read-only host mount + tmpfs (required for Docker Desktop)
 - `--no-sync-back` — Disable sync-back of session data to host on clean exit
 - `--allow-git-push` — Enable `git push` from inside the container (blocked by default for security)
@@ -195,15 +195,15 @@ security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null && ec
 
 ### Token expired / auth errors
 
-OAuth tokens expire. The sandbox automatically detects expired credentials and re-injects fresh ones from keychain on container start. You'll see `[sandbox] Credentials auto-refreshed (expired)` in the output.
+OAuth tokens expire (~1 hour TTL). On container start, the sandbox detects expired credentials and attempts to refresh them by running `claude` on the host (which triggers an OAuth token refresh and updates the keychain). You'll see `[sandbox] Credentials refreshed successfully` in the output.
 
-If auto-refresh fails or you see auth errors mid-session:
+If auto-refresh fails, the container **refuses to start** with a clear error:
+```
+ERROR: Credentials are expired and auto-refresh failed.
+  Run 'claude login' on the host, then restart the container.
+```
 
-1. Re-run `claude login` on your Mac to refresh keychain credentials
-2. Re-launch with `--fresh-creds` to force re-injection:
-   ```bash
-   ./run-claude.sh --fresh-creds ~/Projects/my-project
-   ```
+To fix: run `claude login` (or any prompt in a host-native Claude session) to refresh the keychain, then restart the container.
 
 ### "FATAL: Firewall initialization failed"
 
