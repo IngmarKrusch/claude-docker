@@ -450,3 +450,296 @@ we would need:
 Alternatively, the `--copy-workspace` feature (if implemented) combined
 with the firewall makes MCP token exposure a minimal risk — the tokens
 can only reach their intended providers and are lost on exit.
+
+---
+
+## Landlock Kernel Enforcement + Workspace Snapshots
+
+**Status:** Planned
+**Priority:** Medium — adds kernel-enforced filesystem boundaries inside the
+container, orthogonal to all existing layers
+
+### Problem
+
+Our current filesystem restrictions are user-space conventions: the container
+runs with a read-only rootfs, `/workspace` is a bind mount, and `~/.claude`
+is a tmpfs. But the `claude` process (UID 1000) has no **kernel-enforced**
+restriction on which paths it can access. If the agent finds a writable path
+we didn't anticipate (a new tmpdir, a proc/sys leak, a mount escape), nothing
+at the kernel level says "you can only touch `/workspace`, `~/.claude`, and
+`/tmp`."
+
+Similarly, the agent can `rm -rf /workspace/*` — there is no distinction
+between "write a file" and "delete everything." The damage is instant and
+irreversible within the session.
+
+Finally, we audit the workspace **after** the session ends, but we don't
+capture a pre-session baseline. If the agent modifies a file and then reverts
+it, the post-exit audit sees no diff — but the agent may have exfiltrated
+the original content.
+
+### Inspiration: nono.sh
+
+[nono.sh](https://nono.sh/) is a kernel-enforced capability sandbox for AI
+agents that uses Landlock (Linux) and Seatbelt (macOS) to restrict filesystem
+access at the syscall level. Key ideas from nono.sh that are relevant:
+
+- **Landlock LSM for path restrictions**: Processes self-sandbox by declaring
+  which paths they can access and what operations are permitted (read, write,
+  execute, delete). The kernel enforces this — no user-space bypass possible.
+- **Write-without-delete**: Landlock v2+ can grant `LANDLOCK_ACCESS_FS_WRITE_FILE`
+  without `LANDLOCK_ACCESS_FS_REMOVE_FILE` / `LANDLOCK_ACCESS_FS_REMOVE_DIR`.
+  The agent can create and modify files but cannot delete them.
+- **Pre-execution snapshots**: Capture workspace state before the agent runs,
+  enabling clean rollback.
+
+nono.sh applies these at the **host level** (sandboxing the AI process
+directly on macOS/Linux). We apply them **inside a container** — different
+context, but the same Landlock syscalls are available in our container's
+Linux kernel.
+
+### Key Finding: Landlock Syscalls Already Allowed
+
+Our custom seccomp profile already permits the three Landlock syscalls:
+
+| Syscall | Number | Purpose |
+|---------|--------|---------|
+| `landlock_create_ruleset` | 444 | Create a new Landlock ruleset |
+| `landlock_add_rule` | 445 | Add a path rule to the ruleset |
+| `landlock_restrict_self` | 446 | Apply the ruleset to the calling process |
+
+These are in the default Docker seccomp allowlist and pass through our custom
+profile. No seccomp changes are needed.
+
+### Proposed Solution: Three Layers
+
+#### Layer 1: Landlock Filesystem Enforcement
+
+A new shared library (`landlock-enforce.so`) loaded via `/etc/ld.so.preload`,
+following the same pattern as `nodump.so` (disables core dumps) and
+`git-guard.so` (blocks git config writes). The library's `__attribute__((constructor))`
+function runs before `main()` and applies a Landlock ruleset.
+
+**Allowed paths and access rights:**
+
+| Path | Read | Write | Execute | Delete |
+|------|------|-------|---------|--------|
+| `/workspace` | Yes | Yes | No | Configurable (see Layer 2) |
+| `~/.claude` (tmpfs) | Yes | Yes | No | Yes |
+| `/tmp` | Yes | Yes | No | Yes |
+| `/` (everything else) | Yes | No | No | No |
+
+After `landlock_restrict_self()`, the kernel enforces these rules for the
+process and all children. Even if the agent spawns a shell or binary, the
+restrictions are inherited and cannot be lifted.
+
+**Implementation sketch:**
+
+```c
+// landlock-enforce.c — loaded via /etc/ld.so.preload
+#include <linux/landlock.h>
+#include <sys/syscall.h>
+
+__attribute__((constructor))
+static void enforce_landlock(void) {
+    // Skip if not the claude process (check /proc/self/exe or UID)
+    if (getuid() != 1000) return;
+
+    struct landlock_ruleset_attr attr = {
+        .handled_access_fs =
+            LANDLOCK_ACCESS_FS_WRITE_FILE |
+            LANDLOCK_ACCESS_FS_REMOVE_FILE |
+            LANDLOCK_ACCESS_FS_REMOVE_DIR |
+            LANDLOCK_ACCESS_FS_MAKE_REG |
+            LANDLOCK_ACCESS_FS_MAKE_DIR |
+            LANDLOCK_ACCESS_FS_MAKE_SYM,
+    };
+
+    int ruleset_fd = syscall(SYS_landlock_create_ruleset,
+                             &attr, sizeof(attr), 0);
+    if (ruleset_fd < 0) return;  // Kernel doesn't support Landlock — degrade gracefully
+
+    // Add rules for /workspace (write + create, no delete)
+    add_path_rule(ruleset_fd, "/workspace",
+        LANDLOCK_ACCESS_FS_WRITE_FILE |
+        LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_SYM);
+
+    // Add rules for ~/.claude, /tmp (full write + delete)
+    add_path_rule(ruleset_fd, "/home/claude/.claude",
+        LANDLOCK_ACCESS_FS_WRITE_FILE |
+        LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        LANDLOCK_ACCESS_FS_REMOVE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_DIR);
+
+    // Apply — irreversible for this process and all children
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    syscall(SYS_landlock_restrict_self, ruleset_fd, 0);
+    close(ruleset_fd);
+}
+```
+
+**Graceful degradation**: If the kernel doesn't support Landlock (pre-5.13,
+or the LSM isn't enabled), the constructor returns silently. All other
+layers remain active. This makes it safe to add without breaking older
+Docker hosts.
+
+#### Layer 2: Filesystem Delete Prevention
+
+Landlock v2+ (kernel 5.19+) supports fine-grained file operations. By
+granting `WRITE_FILE` without `REMOVE_FILE`/`REMOVE_DIR` on `/workspace`,
+the agent can:
+
+- Create new files (`touch`, `>`, `tee`)
+- Modify existing files (write, append, truncate)
+- Create directories (`mkdir`)
+
+But **cannot**:
+
+- Delete files (`rm`, `unlink`)
+- Delete directories (`rmdir`, `rm -rf`)
+- Rename across directories (which implies delete at source)
+
+This turns destructive operations into kernel `EACCES` errors. The agent
+sees "Permission denied" and must work non-destructively.
+
+**Trade-off**: Some legitimate workflows need delete — `git checkout` deletes
+files when switching branches, `npm install` removes old packages, build
+tools clean output directories. Options:
+
+1. **Default: delete enabled** — opt-in via `--no-workspace-delete` flag
+2. **Default: delete disabled** — opt-out via `--allow-workspace-delete` flag
+3. **Soft delete** — rename to `.trash/` instead of unlinking (requires a
+   FUSE layer or LD_PRELOAD shim for `unlink()`, more complex)
+
+Recommendation: start with option 1 (delete enabled by default, opt-in
+restriction) since many tools assume delete works. The Landlock ruleset
+makes it a one-line change to toggle.
+
+#### Layer 3: Pre-Session Workspace Snapshot
+
+Before the agent starts, capture a content-addressable snapshot of the
+workspace. This enables:
+
+- **Rollback**: Restore the workspace to its pre-session state if the agent
+  makes unacceptable changes
+- **Tamper detection**: Detect files the agent modified and then reverted
+  (invisible to post-exit diff)
+- **Audit trail**: Know exactly what changed, even if the agent tried to
+  cover its tracks
+
+**Implementation sketch:**
+
+```bash
+# In run-claude.sh, before starting the container:
+snapshot_workspace() {
+    local workspace="$1"
+    local snapshot_dir="$2"
+
+    # Content-addressable manifest: path → SHA-256
+    find "$workspace" -type f \
+        -not -path '*/.git/objects/*' \
+        -not -path '*/node_modules/*' \
+        -exec sha256sum {} + \
+        | sort > "$snapshot_dir/manifest.txt"
+
+    # Also capture metadata (permissions, symlinks)
+    find "$workspace" -not -path '*/.git/objects/*' \
+        -not -path '*/node_modules/*' \
+        -printf '%M %u %g %s %p\n' \
+        | sort > "$snapshot_dir/metadata.txt"
+}
+
+SNAPSHOT_DIR=$(mktemp -d)
+snapshot_workspace "$PROJECT_DIR" "$SNAPSHOT_DIR"
+
+# After session ends, before post-exit audit:
+diff_workspace() {
+    local workspace="$1"
+    local snapshot_dir="$2"
+
+    # Generate current manifest
+    find "$workspace" -type f \
+        -not -path '*/.git/objects/*' \
+        -not -path '*/node_modules/*' \
+        -exec sha256sum {} + \
+        | sort > "$snapshot_dir/current.txt"
+
+    # Compare
+    diff "$snapshot_dir/manifest.txt" "$snapshot_dir/current.txt"
+}
+```
+
+The snapshot pairs with the existing post-exit audit:
+1. Snapshot captures pre-session state
+2. Agent runs
+3. Post-exit audit detects suspect files, hook tampering, git config changes
+4. Snapshot diff shows **all** changes, including reverted ones
+5. With `--copy-workspace`, user can reject changes and roll back completely
+
+### Integration Pattern
+
+All three layers follow established patterns in the project:
+
+| Layer | Pattern | Precedent |
+|-------|---------|-----------|
+| Landlock enforcement | `/etc/ld.so.preload` constructor | `nodump.so`, `git-guard.so` |
+| Delete prevention | Landlock ruleset flag | Same library, different access bits |
+| Workspace snapshot | Pre/post comparison in `run-claude.sh` | `.git/config` snapshot/restore |
+
+The Landlock library is compiled alongside the existing `.so` files in the
+Dockerfile and added to `/etc/ld.so.preload` in the same line:
+
+```dockerfile
+RUN echo "/usr/lib/nodump.so" >> /etc/ld.so.preload && \
+    echo "/usr/lib/git-guard.so" >> /etc/ld.so.preload && \
+    echo "/usr/lib/landlock-enforce.so" >> /etc/ld.so.preload
+```
+
+### Trade-Offs
+
+- **Kernel version dependency**: Landlock requires kernel 5.13+ (basic) or
+  5.19+ (fine-grained delete control). OrbStack and Docker Desktop both run
+  recent kernels (typically 6.x), so this is fine for our macOS target. Linux
+  hosts with older kernels degrade gracefully (constructor no-ops).
+- **No protection for root**: Landlock applies to unprivileged processes. The
+  entrypoint runs as root during init and drops to UID 1000 before starting
+  Claude Code — Landlock is applied at that point. Any root-level escape
+  bypasses Landlock (but root escape also bypasses everything else).
+- **Debug complexity**: Kernel EACCES from Landlock looks identical to regular
+  permission errors. Debugging requires `dmesg` or `audit.log` with Landlock
+  audit support (kernel 6.4+). May need to add logging in the constructor.
+- **Snapshot cost**: `sha256sum` over the entire workspace adds startup time.
+  For large repos, this could be multiple seconds. Mitigations: skip
+  `.git/objects`, `node_modules`, and other large vendored directories;
+  parallelize with `xargs -P`; or use `git hash-object` for tracked files.
+
+### Open Questions
+
+1. **Landlock ABI version detection**: Should the library check the kernel's
+   Landlock ABI version at runtime and adapt the ruleset? v1 (5.13) doesn't
+   support file removal distinctions; v2 (5.19) adds `REFER`; v3 (6.2) adds
+   truncate. The constructor should detect and use the best available version.
+
+2. **Process filtering**: The `/etc/ld.so.preload` library loads into every
+   process. The constructor should check whether it's running as the `claude`
+   user (UID 1000) and skip for root processes (entrypoint init). Should it
+   also skip for specific binaries (git, node) that might need broader access?
+
+3. **Interaction with `--copy-workspace`**: If copy-workspace is active, the
+   agent operates on a disposable copy. Is Landlock still valuable? Yes —
+   it prevents the agent from accessing paths outside the expected set, even
+   within the container. But delete prevention is less critical since the
+   copy is disposable.
+
+4. **Snapshot storage**: For `--copy-workspace`, the snapshot is trivially
+   the original workspace (already preserved). For bind-mount mode, the
+   snapshot manifest lives in a temp directory on the host. Should it be
+   kept for forensic analysis after the session?
+
+5. **FUSE alternative for soft-delete**: Instead of kernel EACCES on delete,
+   a FUSE overlay could intercept `unlink()` and move files to `.trash/`.
+   This preserves tool compatibility but adds complexity. Worth exploring
+   if hard-deny delete proves too disruptive?
