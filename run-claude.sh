@@ -229,6 +229,19 @@ print(creds.get('claudeAiOauth', {}).get('expiresAt', 0))
     fi
 fi
 
+# Strip Anthropic refresh token before injecting into container.
+# The container cannot reach console.anthropic.com (not in firewall allowlist).
+# Refresh tokens are single-use — keeping them risks accidental consumption
+# without being able to persist the replacement. MCP refresh tokens are kept
+# because some MCP OAuth endpoints ARE reachable (e.g., api.todoist.com).
+STRIPPED_CREDS=$(python3 -c "
+import json, sys
+creds = json.loads(sys.stdin.read())
+if 'claudeAiOauth' in creds and isinstance(creds['claudeAiOauth'], dict):
+    creds['claudeAiOauth']['refreshToken'] = ''
+json.dump(creds, sys.stdout, separators=(',', ':'))
+" <<< "$CREDS" 2>/dev/null) && CREDS="$STRIPPED_CREDS" && log "[sandbox] Anthropic refresh token stripped (not needed in container)"
+
 # Extract GitHub token from host (for git push inside container)
 GH_TOKEN=$(gh auth token 2>/dev/null || true)
 # L3 Round 10 fix: Reject error text from gh auth token — valid tokens are
@@ -452,7 +465,7 @@ ENTRYPOINT_LOG=$(mktemp)
 
 # L1 fix: clean up all tempfiles on signal/early-exit
 # shellcheck disable=SC2329  # invoked via trap
-_cleanup_temps() { rm -f "$GIT_CONFIG_BACKUP" "$GIT_CONFIG_HASH_FILE" "$ENTRYPOINT_LOG" "$ENVFILE" 2>/dev/null; rm -rf "${CLAUDE_STAGING:-}" 2>/dev/null; }
+_cleanup_temps() { kill "${SIDECAR_PID:-}" 2>/dev/null; rm -f "$GIT_CONFIG_BACKUP" "$GIT_CONFIG_HASH_FILE" "$ENTRYPOINT_LOG" "$ENVFILE" 2>/dev/null; rm -rf "${CLAUDE_STAGING:-}" 2>/dev/null; }
 trap _cleanup_temps EXIT
 
 # M4 Round 10 fix: Only mount ~/.gitconfig if it exists
@@ -487,11 +500,121 @@ if [ -f "$ALLOWLIST_CONF" ]; then
     done < "$ALLOWLIST_CONF"
 fi
 
+# Host-side token refresh sidecar: refreshes the Anthropic access token before
+# it expires and injects it into the running container via docker exec.
+# Refresh tokens are single-use — consuming one invalidates it server-side and
+# returns a NEW token. The keychain is updated FIRST (before docker exec) to
+# minimize the window where the new refresh token could be lost.
+# shellcheck disable=SC2329  # invoked via background launch below
+_token_refresh_sidecar() {
+    set +e  # Don't let transient failures kill the background sidecar
+    local cname="$1"
+    # Wait for container to start
+    while ! docker inspect "$cname" &>/dev/null; do
+        sleep 1
+    done
+
+    while docker inspect "$cname" &>/dev/null; do
+        sleep 3000  # 50 minutes (access token TTL is ~60 min)
+
+        docker inspect "$cname" &>/dev/null || break
+
+        # Extract current refresh token from keychain
+        local kc_creds
+        kc_creds=$(security find-generic-password \
+            -s "Claude Code-credentials" -w 2>/dev/null || true)
+        [ -z "$kc_creds" ] && continue
+
+        local refresh_token
+        refresh_token=$(python3 -c "
+import json, sys
+creds = json.loads(sys.stdin.read())
+print(creds.get('claudeAiOauth', {}).get('refreshToken', ''))
+" <<< "$kc_creds" 2>/dev/null)
+        [ -z "$refresh_token" ] && continue
+
+        # Call Anthropic OAuth refresh endpoint
+        local response
+        response=$(curl -s -X POST \
+            "https://console.anthropic.com/v1/oauth/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=refresh_token" \
+            -d "refresh_token=$refresh_token" \
+            -d "client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
+            2>/dev/null)
+
+        local new_access new_refresh expires_in
+        new_access=$(python3 -c "
+import json, sys; r=json.loads(sys.stdin.read())
+print(r.get('access_token',''))
+" <<< "$response" 2>/dev/null)
+        new_refresh=$(python3 -c "
+import json, sys; r=json.loads(sys.stdin.read())
+print(r.get('refresh_token',''))
+" <<< "$response" 2>/dev/null)
+        expires_in=$(python3 -c "
+import json, sys; r=json.loads(sys.stdin.read())
+print(r.get('expires_in',''))
+" <<< "$response" 2>/dev/null)
+
+        [ -z "$new_access" ] && continue
+
+        # CRITICAL: Update keychain FIRST — old refresh token is already
+        # consumed/invalidated server-side. If this fails, token is lost.
+        [ "${expires_in:-0}" -gt 0 ] 2>/dev/null || expires_in=3600
+        local new_expires_at
+        new_expires_at=$(( $(date +%s) * 1000 + expires_in * 1000 ))
+        local updated_creds
+        updated_creds=$(python3 -c "
+import json, sys
+creds = json.loads(sys.stdin.read())
+oauth = creds.get('claudeAiOauth', {})
+oauth['accessToken'] = sys.argv[1]
+oauth['refreshToken'] = sys.argv[2]
+oauth['expiresAt'] = int(sys.argv[3])
+creds['claudeAiOauth'] = oauth
+json.dump(creds, sys.stdout, separators=(',', ':'))
+" "$new_access" "$new_refresh" "$new_expires_at" <<< "$kc_creds" 2>/dev/null)
+
+        if [ -n "$updated_creds" ]; then
+            security delete-generic-password \
+                -s "Claude Code-credentials" 2>/dev/null || true
+            security add-generic-password \
+                -s "Claude Code-credentials" \
+                -a "Claude Code" \
+                -w "$updated_creds" 2>/dev/null
+        fi
+
+        # Inject new access token into running container via stdin
+        # (avoids shell metacharacter issues with inline interpolation)
+        docker exec -i -u claude "$cname" python3 -c "
+import json, sys
+token_data = json.loads(sys.stdin.read())
+f = '/home/claude/.claude/.credentials.json'
+with open(f) as fh:
+    c = json.load(fh)
+c['claudeAiOauth']['accessToken'] = token_data['t']
+c['claudeAiOauth']['expiresAt'] = token_data['e']
+with open(f, 'w') as fh:
+    json.dump(c, fh, separators=(',', ':'))
+" <<< "{\"t\":\"$new_access\",\"e\":$new_expires_at}" 2>/dev/null || true
+
+        echo "[sidecar] Access token refreshed (expires in ${expires_in}s)" >&2
+    done
+}
+
+# Name the container for sidecar access
+CONTAINER_NAME="claude-sandbox-$$"
+
 # Delete env file shortly after docker reads it (minimizes on-disk exposure)
 (sleep 2 && rm -f "$ENVFILE") &
 
+_token_refresh_sidecar "$CONTAINER_NAME" &
+SIDECAR_PID=$!
+
 set +e
 docker run --rm -it \
+    --name "$CONTAINER_NAME" \
     --init \
     --cap-drop=ALL \
     --cap-add=CHOWN \
@@ -532,6 +655,10 @@ docker run --rm -it \
     claude "${CLAUDE_ARGS[@]}"
 DOCKER_EXIT=$?
 set -e
+
+# Stop the token refresh sidecar
+kill "$SIDECAR_PID" 2>/dev/null
+wait "$SIDECAR_PID" 2>/dev/null || true
 
 if [ -f "$ENTRYPOINT_LOG" ] && [ -s "$ENTRYPOINT_LOG" ]; then
     # M9 Round 10 fix: Use centralized ANSI sanitization function

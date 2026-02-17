@@ -320,7 +320,7 @@ continues to work for PAT-only setups.
 | Credential | Can agent read it? | Current mitigation | Can we vault/short-live it? |
 |---|---|---|---|
 | Claude Code OAuth access token | Yes (`.credentials.json`) | ~1h TTL already, firewall, tmpfs | No — Anthropic controls auth flow |
-| Claude Code OAuth refresh token | Yes (`.credentials.json`) | Firewall, tmpfs, sync-back exclusion | No — same reason |
+| Claude Code OAuth refresh token | Yes (`.credentials.json`) | Firewall, tmpfs, sync-back exclusion | **Yes — stripped at injection, sidecar refreshes access token** |
 | GitHub token | Yes (`git credential fill`) | Repo-scoped, firewall | **Yes — GitHub App tokens (this item)** |
 | MCP OAuth tokens (Todoist, etc.) | Yes (`.credentials.json`) | Firewall, tmpfs | No — managed by Claude Code |
 | Workspace secrets (`.env`, etc.) | Yes (workspace mount) | Firewall; `--copy-workspace` would help | Yes — use vault references on host, resolve before mount |
@@ -350,3 +350,103 @@ exfiltration of these tokens.
 4. **Multiple repos**: If the user works across multiple repos, do they need
    one App installation per repo, or can a single installation cover an
    organization?
+
+---
+
+## Anthropic Token Refresh: Strip + Host-Side Sidecar
+
+**Status:** Implemented
+**Priority:** High — removes long-lived refresh token from container,
+enables sessions >1 hour
+
+### Problem
+
+The Anthropic OAuth refresh token (`sk-ant-ort01-...`) is injected into
+the container but is completely useless there — the refresh endpoint
+(`console.anthropic.com`) is not in the firewall allowlist (and shouldn't
+be — it would be an exfiltration channel). The refresh token is long-lived
+and single-use, making it both high-value and dangerous if consumed
+accidentally.
+
+Sessions are limited to the access token TTL (~1 hour). When the token
+expires mid-session, Claude Code tries to refresh using the refresh token,
+fails (endpoint unreachable), and the user must restart.
+
+### Solution
+
+Two parts:
+
+**Part 1: Strip the Anthropic refresh token before injection.**
+On the host, before writing credentials to the env file, set
+`claudeAiOauth.refreshToken` to `""`. Only the Anthropic refresh token
+is stripped — MCP refresh tokens are kept (see below).
+
+**Part 2: Host-side sidecar for proactive refresh.**
+A background process on the host that:
+1. Sleeps ~50 minutes (access token TTL minus buffer)
+2. Uses the keychain's refresh token to call
+   `POST https://console.anthropic.com/v1/oauth/token` with
+   `client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e`
+3. Updates the keychain with the new access + refresh tokens
+   (refresh tokens are single-use — the old one is invalidated)
+4. Uses `docker exec` to update `accessToken` and `expiresAt` in
+   the container's `.credentials.json`
+
+### Risk: Claude Code in-memory caching
+
+Claude Code may cache the access token in memory and not re-read
+`.credentials.json` after the docker exec update. If testing confirms
+this, the sidecar still keeps the keychain fresh (faster restarts)
+but can't extend sessions beyond ~1 hour without a Claude Code
+code change or signal-based refresh trigger.
+
+---
+
+## MCP OAuth Token Refresh Strategy
+
+**Status:** Analysis complete, no action needed now
+**Priority:** Low — current behavior is acceptable
+
+### Analysis
+
+MCP OAuth tokens (Todoist, Granola, etc.) are stored alongside the
+Anthropic OAuth token in the same keychain blob (`Claude Code-credentials`).
+They are injected into the container as part of `.credentials.json`.
+
+Unlike the Anthropic refresh token, MCP refresh tokens have a fundamentally
+different situation:
+
+| Aspect | Anthropic OAuth | MCP OAuth (Todoist, etc.) |
+|--------|----------------|--------------------------|
+| Refresh endpoint in allowlist? | No (`console.anthropic.com`) | Some yes (`api.todoist.com`), some no |
+| Can host sidecar refresh? | Yes — known endpoint + client_id | No — each provider has unknown OAuth params |
+| Claude Code self-refresh? | No (endpoint blocked) | Yes (for allowlisted providers) |
+| What if we strip refresh token? | No impact (can't refresh anyway) | Breaks MCP for services with reachable endpoints |
+
+### Decision: Keep MCP refresh tokens
+
+MCP refresh tokens are NOT stripped because:
+
+1. **Some MCP OAuth endpoints are reachable** — `api.todoist.com` is in the
+   firewall allowlist, so Claude Code can self-refresh Todoist tokens inside
+   the container. Stripping would break this.
+2. **We can't refresh them from the host** — each MCP provider has different
+   OAuth endpoints, client_ids, and scopes. The host sidecar doesn't know
+   these parameters.
+3. **The firewall already limits exposure** — MCP refresh tokens can only be
+   sent to allowlisted endpoints (their legitimate providers).
+4. **MCP tokens are ephemeral** — they live on tmpfs, excluded from sync-back,
+   lost on container exit.
+
+### Future consideration
+
+If we want to strip MCP refresh tokens in the future (to reduce exposure),
+we would need:
+- A registry of MCP OAuth endpoints and client_ids per provider
+- The host sidecar to refresh each MCP token alongside the Anthropic token
+- This is complex and provider-specific — not worth pursuing unless a
+  specific MCP provider becomes a security concern
+
+Alternatively, the `--copy-workspace` feature (if implemented) combined
+with the firewall makes MCP token exposure a minimal risk — the tokens
+can only reach their intended providers and are lost on exit.
