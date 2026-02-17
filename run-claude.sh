@@ -446,6 +446,8 @@ SUSPECT_FILES=(
     build.gradle build.gradle.kts pom.xml Vagrantfile WORKSPACE .mise.toml
     .devcontainer/devcontainer.json justfile .justfile Rakefile Gemfile
     babel.config.js Tiltfile Brewfile deno.json deno.jsonc .ruby-version
+    # S-01 R18: Python stdlib shadow — can intercept docker exec python3 invocations
+    json.py
 )
 PRE_SUSPECT=""
 for _sf in "${SUSPECT_FILES[@]}"; do
@@ -509,13 +511,16 @@ fi
 _token_refresh_sidecar() {
     set +e  # Don't let transient failures kill the background sidecar
     local cname="$1"
+    local _sidecar_log
+    _sidecar_log=$(mktemp)
+    local _retry_delay=3000
     # Wait for container to start
     while ! docker inspect "$cname" &>/dev/null; do
         sleep 1
     done
 
     while docker inspect "$cname" &>/dev/null; do
-        sleep 3000  # 50 minutes (access token TTL is ~60 min)
+        sleep "$_retry_delay"
 
         docker inspect "$cname" &>/dev/null || break
 
@@ -587,7 +592,17 @@ json.dump(creds, sys.stdout, separators=(',', ':'))
 
         # Inject new access token into running container via stdin
         # (avoids shell metacharacter issues with inline interpolation)
-        docker exec -i -u claude "$cname" python3 -c "
+        # S-01 fix: python3 -I (isolated mode) removes CWD from sys.path,
+        #   preventing /workspace/json.py from shadowing the stdlib json module.
+        # S-02 fix: -e flags clear sensitive env vars leaked by container config
+        #   (docker exec inherits --env-file vars despite entrypoint unset).
+        # S-03 fix: check exit code instead of || true; only log success on success.
+        if ! docker exec -i -u claude --workdir / \
+            -e CLAUDE_CREDENTIALS= \
+            -e GITHUB_TOKEN= \
+            -e FORCE_CREDENTIALS= \
+            -e ALLOW_GIT_PUSH= \
+            "$cname" python3 -I -c "
 import json, sys
 token_data = json.loads(sys.stdin.read())
 f = '/home/claude/.claude/.credentials.json'
@@ -597,10 +612,23 @@ c['claudeAiOauth']['accessToken'] = token_data['t']
 c['claudeAiOauth']['expiresAt'] = token_data['e']
 with open(f, 'w') as fh:
     json.dump(c, fh, separators=(',', ':'))
-" <<< "{\"t\":\"$new_access\",\"e\":$new_expires_at}" 2>/dev/null || true
+" <<< "{\"t\":\"$new_access\",\"e\":$new_expires_at}" 2>"$_sidecar_log"; then
+            echo "[sidecar] WARNING: Token injection into container failed" >&2
+            [ -s "$_sidecar_log" ] && head -3 "$_sidecar_log" >&2
+            # One fast retry, then back to normal cadence (avoids burning
+            # single-use refresh tokens in a tight loop on persistent failure)
+            if [ "$_retry_delay" -ne 30 ]; then
+                _retry_delay=30
+            else
+                _retry_delay=3000
+            fi
+            continue
+        fi
 
+        _retry_delay=3000  # success — reset to normal 50-min cadence
         echo "[sidecar] Access token refreshed (expires in ${expires_in}s)" >&2
     done
+    rm -f "$_sidecar_log"
 }
 
 # Name the container for sidecar access
