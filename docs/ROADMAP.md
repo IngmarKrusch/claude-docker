@@ -197,3 +197,156 @@ The audit currently operates on `$PROJECT_DIR` (the live workspace). With
 
 5. **Default for unsupervised**: Should `-p` (prompt mode) imply
    `--copy-workspace` since it's inherently non-interactive?
+
+---
+
+## Short-Lived GitHub Tokens via GitHub App
+
+**Status:** Planned
+**Priority:** Medium — reduces blast radius of GitHub token exposure
+
+### Problem
+
+The AI agent runs as the same UID that holds the GitHub token. Any process
+running as `claude` can extract the token via `git credential fill`. Today we
+mitigate this with:
+
+- Fine-grained PAT scoped to the workspace repo (`useHttpPath=true`)
+- Firewall limiting where the token can be sent
+- `--disallow-broad-gh-token` rejecting `ghp_*`/`gho_*` tokens
+
+But a fine-grained PAT is still long-lived (days to months). If exfiltrated
+via an accepted channel (GitHub Markdown API at ~600KB/hour, commit message,
+branch name), the token remains valid long after the session ends.
+
+### Why Not a Proxy-Based Credential Helper?
+
+An earlier idea was to build a root-owned daemon that injects the token into
+git operations without the agent ever seeing it. This was rejected because:
+
+1. **The firewall already covers in-session risk.** During the session, the
+   agent can read the token but can only send it to allowlisted endpoints.
+   The proxy prevents reading — but what would the agent do with the token
+   that the firewall doesn't already block?
+2. **The real risk is post-session.** If the token is exfiltrated via an
+   accepted channel, a long-lived PAT remains valid. A proxy doesn't help
+   after the session ends.
+3. **Custom daemon = custom bugs.** A root-owned daemon with a Unix socket
+   is new attack surface. GitHub App installation tokens are a standard
+   GitHub feature, battle-tested.
+
+### Proposed Solution: GitHub App Installation Tokens
+
+Replace long-lived PATs with short-lived GitHub App installation tokens
+(≤1 hour TTL). Even if exfiltrated, the token is dead before anyone can
+use it.
+
+#### How GitHub App tokens work
+
+1. Create a GitHub App with minimal permissions (e.g., `contents: write`
+   for the target repo only)
+2. Install it on the target repository/organization
+3. At runtime, use the App's private key to generate a short-lived
+   installation token via GitHub's API
+4. The token expires in ≤1 hour and is scoped to the repos the App is
+   installed on
+
+#### Integration with run-claude.sh
+
+```bash
+# Instead of:
+GH_TOKEN=$(gh auth token 2>/dev/null || true)
+
+# With GitHub App:
+if [ -n "$GITHUB_APP_ID" ] && [ -f "$GITHUB_APP_PRIVATE_KEY" ]; then
+    GH_TOKEN=$(generate-installation-token \
+        "$GITHUB_APP_ID" \
+        "$GITHUB_APP_PRIVATE_KEY" \
+        "$GITHUB_APP_INSTALLATION_ID")
+    log "[sandbox] GitHub token: short-lived installation token (≤1h TTL)"
+else
+    GH_TOKEN=$(gh auth token 2>/dev/null || true)
+    # ... existing PAT validation ...
+fi
+```
+
+The `generate-installation-token` helper would:
+1. Create a JWT signed with the App's private key
+2. Call `POST /app/installations/{id}/access_tokens` to get an installation token
+3. Output the token (short-lived, scoped)
+
+This can be done with `openssl` + `curl` (no external dependencies) or via
+the `gh` CLI if it supports GitHub App auth.
+
+#### Configuration
+
+New flags or environment variables:
+
+```bash
+./run-claude.sh \
+    --github-app-id 12345 \
+    --github-app-key ~/.config/github-app/private-key.pem \
+    --github-app-installation-id 67890 \
+    ~/Projects/my-project
+```
+
+Or via environment:
+```bash
+export GITHUB_APP_ID=12345
+export GITHUB_APP_PRIVATE_KEY_PATH=~/.config/github-app/private-key.pem
+export GITHUB_APP_INSTALLATION_ID=67890
+./run-claude.sh ~/Projects/my-project
+```
+
+#### What this achieves
+
+| | Long-lived PAT (today) | GitHub App token |
+|---|---|---|
+| TTL | Days to months | ≤1 hour |
+| Scope | User-configured | App installation (repos) |
+| Post-exfiltration risk | High — valid until rotated | None — expired |
+| Revocation | Manual | Automatic (expiry) |
+| Audit | GitHub token log | GitHub App audit log |
+| Setup complexity | Low (create PAT) | Medium (create App, install, configure) |
+
+#### Fallback
+
+The existing PAT flow remains the default. GitHub App tokens are opt-in for
+users who want stronger guarantees. The `--disallow-broad-gh-token` flag
+continues to work for PAT-only setups.
+
+### Credential Landscape Summary
+
+| Credential | Can agent read it? | Current mitigation | Can we vault/short-live it? |
+|---|---|---|---|
+| Claude Code OAuth access token | Yes (`.credentials.json`) | ~1h TTL already, firewall, tmpfs | No — Anthropic controls auth flow |
+| Claude Code OAuth refresh token | Yes (`.credentials.json`) | Firewall, tmpfs, sync-back exclusion | No — same reason |
+| GitHub token | Yes (`git credential fill`) | Repo-scoped, firewall | **Yes — GitHub App tokens (this item)** |
+| MCP OAuth tokens (Todoist, etc.) | Yes (`.credentials.json`) | Firewall, tmpfs | No — managed by Claude Code |
+| Workspace secrets (`.env`, etc.) | Yes (workspace mount) | Firewall; `--copy-workspace` would help | Yes — use vault references on host, resolve before mount |
+
+The irreducible problem: the Claude Code OAuth tokens (access + refresh) and
+MCP tokens live in `.credentials.json` which Claude Code itself re-creates
+after any scrub attempt (R13-02). The agent will always be able to read its
+own operational credentials. The firewall is the primary defense against
+exfiltration of these tokens.
+
+### Open Questions
+
+1. **Token generation without Vault**: A simple shell script using `openssl`
+   and `curl` can generate GitHub App installation tokens. Is that sufficient,
+   or should we support Vault's GitHub secrets engine as well for teams that
+   already use Vault?
+
+2. **Private key storage**: The GitHub App private key is a high-value secret
+   on the host. It should be in the macOS keychain or a file with 600
+   permissions, never in the project directory. Should `run-claude.sh`
+   support reading it from the keychain?
+
+3. **Installation ID discovery**: Can we auto-detect the installation ID
+   from the repo's remote URL + the App ID, or must the user provide it?
+   The GitHub API supports listing installations, which could automate this.
+
+4. **Multiple repos**: If the user works across multiple repos, do they need
+   one App installation per repo, or can a single installation cover an
+   organization?
