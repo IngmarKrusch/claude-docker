@@ -36,7 +36,7 @@ For setup and usage, see the [README](../README.md). For security model and hard
 │  │  │   /mnt/.claude-host← staged data (ro)     │  │  │
 │  │  │   ~/.claude        ← tmpfs (nosuid,512m)  │  │  │
 │  │  │   /tmp             ← tmpfs (noexec,nosuid,512m) │  │  │
-│  │  │   ~/.npm           ← tmpfs (nosuid,256m)   │  │  │
+│  │  │   ~/.npm           ← tmpfs (exec,nosuid,256m)│  │  │
 │  │  │   ~/.config        ← tmpfs (nosuid,64m)  │  │  │
 │  │  │   /run             ← tmpfs (nosuid,noexec,1m) │  │  │
 │  │  │   /dev/shm         ← 64m                 │  │  │
