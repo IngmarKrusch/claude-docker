@@ -448,6 +448,8 @@ SUSPECT_FILES=(
     babel.config.js Tiltfile Brewfile deno.json deno.jsonc .ruby-version
     # S-01 R18: Python stdlib shadow — can intercept docker exec python3 invocations
     json.py
+    # R19-04/R19-05: git info files — filter driver persistence and diff hiding
+    .git/info/attributes .git/info/exclude
 )
 PRE_SUSPECT=""
 for _sf in "${SUSPECT_FILES[@]}"; do
@@ -706,7 +708,8 @@ if [ "$SYNC_BACK" = true ] && [ -d "$HOME/.claude/.sync-back/data" ]; then
 
     echo "[sandbox] Syncing session data back to host..."
     # H6 Round 10 fix: Align exclusions with entrypoint-side rsync
-    rsync -a --no-links \
+    # R19-01: --no-specials --no-devices skip FIFOs, sockets, and device nodes
+    rsync -a --no-links --no-specials --no-devices \
         --exclude='settings.json' \
         --exclude='settings.local.json' \
         --exclude='statusline-command.sh' \

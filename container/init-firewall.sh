@@ -107,7 +107,9 @@ iptables -A OUTPUT -d "$HOST_NETWORK" -p tcp --dport 2376 -j DROP
 
 # Set up remaining iptables rules
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
-iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
+# R19-02: TCP-only — Docker Desktop MCP proxy uses TCP; UDP/SCTP/raw not needed.
+# Return traffic for TCP connections is handled by ESTABLISHED,RELATED (below).
+iptables -A OUTPUT -p tcp -d "$HOST_NETWORK" -j ACCEPT
 
 # Set default policies to DROP first
 iptables -P INPUT DROP
@@ -126,6 +128,9 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # Block outbound SSH — this repo uses HTTPS for GitHub, and SSH port 22 is a
 # data exfiltration channel (raw TCP accepted by github.com:22 without auth).
 iptables -A OUTPUT -p tcp --dport 22 -j DROP
+# R19-07: Block SCTP — unnecessary protocol, already blocked by default DROP
+# policy but explicit rule provides defense-in-depth and clear audit trail.
+iptables -A OUTPUT -p sctp -j DROP
 # H2 Round 10 fix: Restrict ipset to HTTPS (443) and HTTP (80) only.
 # Previously allowed ALL protocols/ports to any IP in allowed-domains.
 iptables -A OUTPUT -p tcp --dport 443 -m set --match-set allowed-domains dst -j ACCEPT
@@ -133,6 +138,12 @@ iptables -A OUTPUT -p tcp --dport 80 -m set --match-set allowed-domains dst -j A
 
 # Explicitly REJECT all other outbound traffic for immediate feedback
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+
+# R19-06: Delete unused tunnel interfaces (kernel defaults, inoperable after
+# privilege drop — NET_ADMIN is cleared from bounding set). Defense-in-depth.
+ip link delete tunl0 2>/dev/null || true
+ip link delete sit0 2>/dev/null || true
+ip link delete ip6tnl0 2>/dev/null || true
 
 _log "Firewall configuration complete"
 _log "Verifying firewall rules..."

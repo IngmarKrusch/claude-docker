@@ -142,7 +142,9 @@ sync_back_on_exit() {
         # (e.g. ~/.claude/evil -> /etc/passwd on host). --safe-links only blocked
         # absolute symlinks, but relative symlinks like ../../../etc/passwd could
         # still escape. --no-links is the strictest option.
-        rsync -a --no-links \
+        # R19-01: --no-specials --no-devices skip FIFOs, sockets, and device
+        # nodes — prevents DoS/data-injection via named pipes in sync-back.
+        rsync -a --no-links --no-specials --no-devices \
             --exclude='settings.json' \
             --exclude='settings.local.json' \
             --exclude='statusline-command.sh' \
@@ -370,6 +372,15 @@ if [ -f /workspace/.git/config ]; then
     # blocking filter driver injection and TOCTOU config manipulation.
     chown root:root /workspace/.git/config 2>/dev/null || true
     chmod 444 /workspace/.git/config 2>/dev/null || true
+    # R19-03: Lock .git/hooks/ to prevent hook planting. core.hooksPath=/dev/null
+    # already prevents execution inside the container; this blocks creation of
+    # hooks that would persist to the host and execute on host-side git operations.
+    # NOTE: No-op on macOS/OrbStack (virtiofs ignores chown/chmod on bind mounts).
+    # Primary defense remains the post-exit interactive hook review (run-claude.sh).
+    # Using 755/644 (not 555/444) so the post-exit audit can still delete hooks.
+    chown -R root:root /workspace/.git/hooks 2>/dev/null || true
+    chmod 755 /workspace/.git/hooks 2>/dev/null || true
+    chmod 644 /workspace/.git/hooks/* 2>/dev/null || true
 fi
 
 # Note: core.hooksPath and credential.helper are enforced by the git wrapper
