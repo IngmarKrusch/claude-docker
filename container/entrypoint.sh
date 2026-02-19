@@ -300,22 +300,6 @@ else
     log "[sandbox] Warning: No credentials found. Run 'claude login' or mount credentials."
 fi
 
-# Deferred credential scrub: overwrite and delete the plaintext credentials file
-# after Claude Code has had time to read and cache them. We overwrite rather than
-# chmod because virtiofs (macOS Docker mounts) ignores POSIX permission changes.
-# NOTE: This scrub is best-effort. Claude Code may re-create .credentials.json
-# after the scrub completes, so the file may persist for the entire session
-# lifetime. True protection comes from: (1) .credentials.json is excluded from
-# sync-back so tokens never reach the host, (2) the firewall restricts where
-# tokens can be sent, (3) tmpfs is ephemeral — gone on container exit.
-(sleep 1 && {
-    CRED_SIZE=$(stat -c%s "$CREDS_FILE" 2>/dev/null || echo 0)
-    if [ "$CRED_SIZE" -gt 0 ]; then
-        dd if=/dev/urandom of="$CREDS_FILE" bs="$CRED_SIZE" count=1 conv=notrunc 2>/dev/null
-    fi
-    rm -f "$CREDS_FILE"
-}) &
-
 # Ensure Claude Code's config file lives on the volume.
 # Without this, config is written to ~/.claude.json (outside the volume mount)
 # and lost when the container exits. ~/.claude/.config.json is the preferred
@@ -487,6 +471,21 @@ chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/nul
 # write to it, and root lacks CAP_DAC_OVERRIDE (can't write claude-owned files).
 # Root retains CAP_CHOWN so this works even after the blanket chown.
 chown root: "$LOGFILE" 2>/dev/null || true
+
+# Deferred credential scrub: best-effort overwrite and delete of the plaintext
+# credentials file. Placed AFTER chown so that .credentials.json is now owned
+# by claude — root without CAP_DAC_OVERRIDE cannot overwrite or delete it, so
+# the scrub silently fails. This is intentional: Claude Code needs the file at
+# startup to authenticate. The file persists on tmpfs for the session lifetime.
+# True protection: (1) excluded from sync-back, (2) firewall limits exfiltration,
+# (3) tmpfs is ephemeral — gone on container exit.
+(sleep 1 && {
+    CRED_SIZE=$(stat -c%s "$CREDS_FILE" 2>/dev/null || echo 0)
+    if [ "$CRED_SIZE" -gt 0 ]; then
+        dd if=/dev/urandom of="$CREDS_FILE" bs="$CRED_SIZE" count=1 conv=notrunc 2>/dev/null
+    fi
+    rm -f "$CREDS_FILE"
+}) &
 
 # Verify npx actually works as claude (same code path Claude Code uses for MCP).
 # This is the critical diagnostic that was missing — previous diagnostics only
