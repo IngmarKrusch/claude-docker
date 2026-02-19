@@ -483,6 +483,10 @@ fi
 # Done here (not earlier) because root without CAP_DAC_OVERRIDE cannot write
 # to directories/files owned by other users — all root writes must complete first.
 chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/null || true
+# Reclaim entrypoint log for root — post-chown diagnostics below still need to
+# write to it, and root lacks CAP_DAC_OVERRIDE (can't write claude-owned files).
+# Root retains CAP_CHOWN so this works even after the blanket chown.
+chown root: "$LOGFILE" 2>/dev/null || true
 
 # Verify npx actually works as claude (same code path Claude Code uses for MCP).
 # This is the critical diagnostic that was missing — previous diagnostics only
