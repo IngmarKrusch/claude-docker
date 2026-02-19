@@ -662,7 +662,7 @@ docker run --rm -it \
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,size=512m \
     --tmpfs /home/claude/.config:rw,nosuid,size=64m \
-    --tmpfs /home/claude/.npm:rw,noexec,nosuid,size=256m \
+    --tmpfs /home/claude/.npm:rw,nosuid,size=256m \
     --tmpfs /run:rw,nosuid,noexec,size=1m \
     --env-file "$ENVFILE" \
     --shm-size=64m \

@@ -230,6 +230,39 @@ if ! /usr/local/bin/init-firewall.sh 2>/dev/null; then
 fi
 log "[sandbox] Firewall initialized"
 
+# Parse MCP npx package names once (used by diagnostics and pre-warming below)
+_mcp_pkgs=""
+if [ -f /workspace/.mcp.json ]; then
+    _mcp_pkgs=$(jq -r '
+      .mcpServers // {} | to_entries[] |
+      select(.value.command == "npx") |
+      [(.value.args // [])[] | select(startswith("-") | not)] | .[0] // empty
+    ' /workspace/.mcp.json 2>/dev/null || true)
+fi
+
+# --- MCP server diagnostics: test npx + network reachability ---
+if [ -n "$_mcp_pkgs" ]; then
+    # Test 1: Can claude user reach the npm registry?
+    if gosu claude curl --connect-timeout 5 -sI https://registry.npmjs.org/ >/dev/null 2>&1; then
+        log "[sandbox] MCP diag: registry.npmjs.org reachable as claude"
+    else
+        log "[sandbox] MCP diag: WARNING - registry.npmjs.org NOT reachable as claude"
+    fi
+    # Test 2: Check /etc/hosts vs ipset alignment for key domains
+    for _domain in registry.npmjs.org api.todoist.com; do
+        _hosts_ip=$(awk -v d="$_domain" '{for(i=2;i<=NF;i++)if($i==d){print $1;exit}}' /etc/hosts)
+        if [ -n "$_hosts_ip" ]; then
+            if ipset test allowed-domains "$_hosts_ip" 2>/dev/null; then
+                log "[sandbox] MCP diag: $_domain ($_hosts_ip) in ipset"
+            else
+                log "[sandbox] MCP diag: WARNING - $_domain ($_hosts_ip) NOT in ipset (split DNS!)"
+            fi
+        else
+            log "[sandbox] MCP diag: WARNING - $_domain not in /etc/hosts"
+        fi
+    done
+fi
+
 # Write credentials from environment variable into .claude directory
 CREDS_FILE="/home/claude/.claude/.credentials.json"
 
@@ -412,10 +445,63 @@ if [ -n "$GITHUB_TOKEN" ]; then
     unset _REMOTE_URL _REPO_PATH
 fi
 
+# Pre-warm MCP npm packages into the npx execution cache (~/.npm/_npx/).
+# Previous approach used `npm install --prefix <tmpdir>` which only populated
+# the tarball cache (~/.npm/_cacache/), NOT the npx cache. When Claude Code
+# later ran `npx <pkg>`, npx found an empty _npx/ cache and had to install
+# at runtime — hitting MCP startup timeouts or corrupting the stdio protocol.
+# `npm exec --yes --package <pkg> -- node -e ""` installs into _npx/ directly.
+# Runs as root (has DNS access). HOME=/home/claude directs cache to tmpfs.
+# NOTE: Unlike the old `npm install --ignore-scripts`, npm exec runs postinstall
+# scripts as root. Accepted tradeoff: (1) packages come from user's .mcp.json
+# (user trusts them), (2) registry is firewalled, (3) --ignore-scripts would
+# leave the npx cache incomplete (npx doesn't re-run scripts on cache hit),
+# breaking packages that need postinstall (e.g. native addons).
+if [ -n "$_mcp_pkgs" ]; then
+    log "[sandbox] Pre-warming MCP npm packages (npx cache)..."
+    while IFS= read -r _pkg; do
+        [ -z "$_pkg" ] && continue
+        _npm_err=$(mktemp /tmp/npm-err.XXXXXX)
+        if timeout 60 env HOME=/home/claude npm exec --yes --package "$_pkg" \
+                -- node -e "" 2>"$_npm_err"; then
+            log "[sandbox]   warmed: $_pkg (npx cache populated)"
+        else
+            log "[sandbox]   WARNING: failed to warm $_pkg (exit $?)"
+            # Log first 5 lines of npm error for diagnostics
+            while IFS= read -r _errline; do
+                log "[sandbox]     $_errline"
+            done < <(head -5 "$_npm_err")
+        fi
+        rm -f "$_npm_err"
+    done <<< "$_mcp_pkgs"
+    # Verify npx cache was actually populated
+    _npx_dirs=$(find /home/claude/.npm/_npx -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    log "[sandbox] npx cache: $_npx_dirs package dir(s) in ~/.npm/_npx/"
+fi
+
 # Transfer ownership of all tmpfs content to claude before privilege drop.
 # Done here (not earlier) because root without CAP_DAC_OVERRIDE cannot write
 # to directories/files owned by other users — all root writes must complete first.
 chown -R claude: "$CLAUDE_DIR" /home/claude/.npm /home/claude/.config 2>/dev/null || true
+
+# Verify npx actually works as claude (same code path Claude Code uses for MCP).
+# This is the critical diagnostic that was missing — previous diagnostics only
+# tested curl/network, not npx execution. If this fails, the actual error
+# (permissions, node compat, missing libs) will be visible in logs.
+if [ -n "$_mcp_pkgs" ]; then
+    _first_pkg=$(echo "$_mcp_pkgs" | head -1)
+    if [ -n "$_first_pkg" ]; then
+        _test_err=$(mktemp /tmp/npx-test.XXXXXX)
+        if timeout 15 gosu claude env HOME=/home/claude npm_config_yes=true \
+                npx --yes --package "$_first_pkg" -- node -e "process.stderr.write('npx-ok\\n')" 2>"$_test_err"; then
+            log "[sandbox] MCP diag: npx execution verified as claude ($_first_pkg)"
+        else
+            log "[sandbox] MCP diag: WARNING - npx execution FAILED as claude (exit $?)"
+            head -10 "$_test_err" | while IFS= read -r l; do log "[sandbox]   $l"; done
+        fi
+        rm -f "$_test_err"
+    fi
+fi
 
 # Lock down gitconfig: prevent session from modifying git configuration.
 # Must come AFTER the blanket chown (which sets everything to claude) and
@@ -459,6 +545,11 @@ ulimit -Hc 0 2>/dev/null; ulimit -Sc 0
 # ensures Claude Code doesn't attempt to send error reports even if the allowlist
 # is accidentally widened in the future.
 export DISABLE_ERROR_REPORTING=1
+
+# Auto-accept npx install prompts. If an npx cache miss occurs at runtime
+# (e.g., MCP server package evicted), npx auto-installs instead of prompting
+# on stdin — which would corrupt the MCP stdio JSON-RPC protocol.
+export npm_config_yes=true
 
 # Drop privileges and clear the bounding set in a single setpriv call.
 # We can't exec gosu after clearing the bounding set because gosu needs

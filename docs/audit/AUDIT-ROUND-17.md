@@ -248,7 +248,7 @@ fi
 
 #### Hypothesis
 
-`--shm-size=64m` was hypothesized to lack `noexec`, creating an executable tmpfs gap (unlike `/tmp`, `~/.npm`, `/run` which all have `noexec`).
+`--shm-size=64m` was hypothesized to lack `noexec`, creating an executable tmpfs gap (unlike `/tmp` and `/run` which have `noexec`; note: `~/.npm` does NOT have `noexec` — see `run-claude.sh`).
 
 #### Test Results
 
